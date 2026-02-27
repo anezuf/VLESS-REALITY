@@ -1,9 +1,11 @@
 # MTProto Proxy Deployment Guide
 
-**Official telegrammessenger/proxy**  
-OS: Ubuntu / Debian  
-Port: 9444  
-Runtime: Docker
+------------------------------------------------------------------------
+
+Install VLESS
+``` bash
+bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no
+```
 
 ------------------------------------------------------------------------
 

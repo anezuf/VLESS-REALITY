@@ -58,7 +58,7 @@ docker run -d \
   --name mtproto_proxy \
   --restart unless-stopped \
   -p 9444:443 \
-  -e SECRET=ВАШ_HEX_СЕКРЕТ \
+  -e SECRET=YOUR_HEX_SECRET \
   telegrammessenger/proxy
 ```
 

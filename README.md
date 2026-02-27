@@ -75,19 +75,7 @@ docker run -d \
 
 ------------------------------------------------------------------------
 
-## 6. Verify Container
-
-``` bash
-docker ps
-```
-
-Expected output:
-
-    0.0.0.0:9444->443/tcp
-
-------------------------------------------------------------------------
-
-## 7. Register in @MTProxybot
+## 6. Register in @MTProxybot
 
     /newproxy
 
@@ -98,13 +86,13 @@ Enter:
 
 ------------------------------------------------------------------------
 
-## 8. Connect via Telegram
+## 7. Connect via Telegram
 
     https://t.me/proxy?server=YOUR_IP&port=9444&secret=YOUR_HEX_SECRET
 
 ------------------------------------------------------------------------
 
-## 9. Remove Proxy
+## 8. Remove Proxy
 
 ``` bash
 docker rm -f mtproto_proxy

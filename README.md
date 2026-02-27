@@ -52,13 +52,23 @@ Also open TCP 9444 in VPS provider firewall panel if applicable.
 ## 5. Run MTProto Proxy
 
 ``` bash
-docker run -d   --name mtproto_proxy   --restart unless-stopped   -p 9444:443   -e SECRET=YOUR_HEX_SECRET   telegrammessenger/proxy
+docker run -d \
+  --name mtproto_proxy \
+  --restart unless-stopped \
+  -p 9444:443 \
+  -e SECRET=ВАШ_HEX_СЕКРЕТ \
+  telegrammessenger/proxy
 ```
 
 Example:
 
 ``` bash
-docker run -d   --name mtproto_proxy   --restart unless-stopped   -p 9444:443   -e SECRET=590615e578f1fd628069d981ca9c9557   telegrammessenger/proxy
+docker run -d \
+  --name mtproto_proxy \
+  --restart unless-stopped \
+  -p 9444:443 \
+  -e SECRET=590615e578f1fd628069d981ca9c9557 \
+  telegrammessenger/proxy
 ```
 
 ------------------------------------------------------------------------
@@ -75,28 +85,7 @@ Expected output:
 
 ------------------------------------------------------------------------
 
-## 7. Check Logs
-
-``` bash
-docker logs mtproto_proxy
-```
-
-Should show:
-
-    Using the explicitly passed secret
-    Starting proxy...
-
-------------------------------------------------------------------------
-
-## 8. Get Public IP
-
-``` bash
-curl ifconfig.me
-```
-
-------------------------------------------------------------------------
-
-## 9. Register in @MTProxybot
+## 8. Register in @MTProxybot
 
     /newproxy
 
@@ -107,35 +96,13 @@ Enter:
 
 ------------------------------------------------------------------------
 
-## 10. Connect via Telegram
+## 9. Connect via Telegram
 
     https://t.me/proxy?server=YOUR_IP&port=9444&secret=YOUR_HEX_SECRET
 
 ------------------------------------------------------------------------
 
-## 11. Diagnostics (Optional)
-
-Check listening port:
-
-``` bash
-ss -tulpn | grep 9444
-```
-
-Active connections:
-
-``` bash
-ss -tnp | grep 9444
-```
-
-Live logs:
-
-``` bash
-docker logs -f mtproto_proxy
-```
-
-------------------------------------------------------------------------
-
-## 12. Update Proxy
+## 10. Update Proxy
 
 ``` bash
 docker pull telegrammessenger/proxy
@@ -146,7 +113,7 @@ docker run -d   --name mtproto_proxy   --restart unless-stopped   -p 9444:443   
 
 ------------------------------------------------------------------------
 
-## 13. Remove Proxy
+## 11. Remove Proxy
 
 ``` bash
 docker rm -f mtproto_proxy

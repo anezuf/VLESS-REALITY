@@ -104,18 +104,7 @@ Enter:
 
 ------------------------------------------------------------------------
 
-## 9. Update Proxy
-
-``` bash
-docker pull telegrammessenger/proxy
-docker rm -f mtproto_proxy
-
-docker run -d   --name mtproto_proxy   --restart unless-stopped   -p 9444:443   -e SECRET=YOUR_HEX_SECRET   telegrammessenger/proxy
-```
-
-------------------------------------------------------------------------
-
-## 10. Remove Proxy
+## 9. Remove Proxy
 
 ``` bash
 docker rm -f mtproto_proxy

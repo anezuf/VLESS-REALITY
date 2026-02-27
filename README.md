@@ -53,7 +53,7 @@ Also open TCP 9444 in VPS provider firewall panel if applicable.
 
 ## 5. Run MTProto Proxy
 
-``` bash
+```bash
 docker run -d \
   --name mtproto_proxy \
   --restart unless-stopped \
@@ -64,7 +64,7 @@ docker run -d \
 
 Example:
 
-``` bash
+```bash
 docker run -d \
   --name mtproto_proxy \
   --restart unless-stopped \

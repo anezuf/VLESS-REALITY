@@ -37,7 +37,7 @@ openssl rand -hex 16
 
 Save the generated 32-character HEX string.
 
-------------------------------------------------------------------------
+
 
 ## 4. Open Port 9444 (if UFW enabled)
 
@@ -49,7 +49,7 @@ sudo ufw status
 
 Also open TCP 9444 in VPS provider firewall panel if applicable.
 
-------------------------------------------------------------------------
+
 
 ## 5. Run MTProto Proxy
 
@@ -73,7 +73,7 @@ docker run -d \
   telegrammessenger/proxy
 ```
 
-------------------------------------------------------------------------
+
 
 ## 6. Register in @MTProxybot
 
@@ -84,7 +84,7 @@ Enter:
     YOUR_IP:9444
     YOUR_HEX_SECRET
 
-------------------------------------------------------------------------
+
 
 ## 7. Connect via Telegram
 

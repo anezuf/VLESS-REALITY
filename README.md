@@ -15,7 +15,7 @@ bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -in
 sudo apt update && sudo apt upgrade -y
 ```
 
-------------------------------------------------------------------------
+
 
 ## 2. Install Docker
 
@@ -27,7 +27,7 @@ systemctl start docker
 docker --version
 ```
 
-------------------------------------------------------------------------
+
 
 ## 3. Generate Secret (HEX)
 

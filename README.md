@@ -1,5 +1,10 @@
 # MTProto Proxy Deployment Guide
 
+Reset
+``` bash
+ssh-keygen -R <ip>
+```
+
 ------------------------------------------------------------------------
 
 Install VLESS

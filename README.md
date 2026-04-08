@@ -8,14 +8,6 @@ ssh-keygen -R <ip>
 
 ---
 
-## 1. Установка 3x-ui
-
-```bash
-bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no
-```
-
----
-
 ## 1. Системное обновление
 
 ```bash

@@ -1,30 +1,28 @@
-# MTProto Proxy Deployment Guide
+# Гайд по настройке панели 3x-ui
 
-Reset
-``` bash
+## Reset (при необходимости)
+
+```bash
 ssh-keygen -R <ip>
 ```
 
-------------------------------------------------------------------------
+---
 
-Install VLESS
-``` bash
+## 1. Установка 3x-ui
+
+```bash
 bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no
 ```
 
-------------------------------------------------------------------------
+---
 
-## 1. System Update
+## 2. Системное обновление и Docker
 
-``` bash
+```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
-
-
-## 2. Install Docker
-
-``` bash
+```bash
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
 systemctl enable docker
@@ -32,73 +30,78 @@ systemctl start docker
 docker --version
 ```
 
+---
 
+## 3. Настройка SNI в подключениях
 
-## 3. Generate Secret (HEX)
+В панели 3x-ui, в настройках подключения (inbound), прописать SNI — это домен, под который маскируется трафик. Используются российские домены, чтобы трафик выглядел легитимным для РКН:
 
-``` bash
-openssl rand -hex 16
-```
+- `api-maps.yandex.ru`
+- `www.vk.com`
+- `gp.x5.ru`
+- `ozon.ru`
 
-Save the generated 32-character HEX string.
+Можно использовать любой другой популярный российский домен. Главное — чтобы он был достаточно крупным и не вызывал подозрений.
 
+---
 
+## 4. Включение сниффинга
 
-## 4. Open Port 9444 (if UFW enabled)
+В настройках inbound включить **Sniffing** и поставить галочки на:
 
-``` bash
-sudo ufw allow 9444/tcp
-sudo ufw reload
-sudo ufw status
-```
+- `http`
+- `tls`
+- `quic`
 
-Also open TCP 9444 in VPS provider firewall panel if applicable.
+Обязательно включить опцию **Route Only**.
 
+Сниффинг нужен для того, чтобы xray мог определить протокол и домен назначения прямо из трафика — без его расшифровки. Это позволяет маршрутизатору понять, куда идёт пакет, и применить правила маршрутизации: например, заблокировать трафик на российские домены или направить его в нужный туннель. Опция Route Only гарантирует, что сниффинг используется исключительно для маршрутизации, а не для изменения самого трафика.
 
+---
 
-## 5. Run MTProto Proxy
+## 5. Стратегия разрешения DNS
 
-```bash
-docker run -d \
-  --name mtproto_proxy \
-  --restart unless-stopped \
-  -p 9444:443 \
-  -e SECRET=YOUR_HEX_SECRET \
-  telegrammessenger/proxy
-```
+В панели: **Настройки Xray → Основные настройки → DNS-стратегия маршрутизации**
 
-Example:
+Изменить значение с `asls` на `IPIfNonMatch`.
 
-```bash
-docker run -d \
-  --name mtproto_proxy \
-  --restart unless-stopped \
-  -p 9444:443 \
-  -e SECRET=590615e578f1fd628069d981ca9c9557 \
-  telegrammessenger/proxy
-```
+Это означает: сначала xray пытается применить правила маршрутизации по домену. Если домен не совпадает ни с одним правилом — резолвит его в IP и пробует снова. Такой подход снижает нагрузку на DNS и улучшает точность маршрутизации.
 
+---
 
+## 6. Базовое соединение — Warp
 
-## 6. Register in @MTProxybot
+В панели: **Настройки Xray → Базовые соединения**
 
-    /newproxy
+Установить **Warp** в качестве базового исходящего соединения. Весь трафик, не попавший под другие правила, будет уходить через Warp.
 
-Enter:
+---
 
-    YOUR_IP:9444
-    YOUR_HEX_SECRET
+## 7. Маршрутизация
 
+В панели: **Настройки Xray → Маршрутизация**
 
+Правила в порядке приоритета (сверху вниз):
 
-## 7. Connect via Telegram
+| # | Условие | Действие |
+|---|---------|----------|
+| 1 | IP назначения: `geoip:ru` | blocked |
+| 2 | Домен: `domain:ru`, `domain:su`, `domain:xn--p1ai`, `geosite:category-ru`, Ads All | blocked |
+| 3 | Протокол L4: UDP, порт 443 | blocked |
+| 4 | Тег входящего: `api` | api |
+| 5 | IP назначения: `geoip:private` | blocked |
+| 6 | Протокол: `bittorrent` | blocked |
+| 7 | Клиент: `first` | warp |
 
-    https://t.me/proxy?server=YOUR_IP&port=9444&secret=YOUR_HEX_SECRET
+**Пояснение логики:**
 
-------------------------------------------------------------------------
+- Правила 1–2 блокируют весь российский трафик (по IP и по доменам, включая зону .ru, .su, .рф и рекламные домены).
+- Правило 3 блокирует UDP/443 — это QUIC/HTTP3, который может использоваться для обхода блокировок нежелательным образом.
+- Правило 4 направляет трафик с тегом `api` на отдельный исходящий.
+- Правило 5 блокирует обращения к приватным IP (локальная сеть).
+- Правило 6 блокирует BitTorrent.
+- Правило 7 — всё остальное уходит через Warp.
 
-## 8. Remove Proxy
+**Заблокированные IP-адреса:** `geoip:ru`, `Private IPs`
 
-``` bash
-docker rm -f mtproto_proxy
-```
+**Заблокированные домены:** `domain:ru`, `domain:su`, `domain:xn--p1ai`, `geosite:category-ru`, `Ads All`

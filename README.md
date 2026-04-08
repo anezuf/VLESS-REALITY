@@ -16,18 +16,18 @@ bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -in
 
 ---
 
-## 2. Системное обновление и Docker
+## 1. Системное обновление
 
 ```bash
 sudo apt update && sudo apt upgrade -y
 ```
 
+---
+
+## 2. Установка 3x-ui
+
 ```bash
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-systemctl enable docker
-systemctl start docker
-docker --version
+bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no
 ```
 
 ---

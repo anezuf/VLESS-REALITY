@@ -3,8 +3,8 @@
 ## Reset (при необходимости)
 
 ```bash
-ssh-keygen -R
-``` <kbd>ip-server</kbd>
+ssh-keygen -R <ip-server>
+```
 
 ---
 
@@ -41,9 +41,10 @@ bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -in
 
 В настройках inbound включить **Sniffing** и поставить галочки на:
 
-- `http`
-- `tls`
-- `quic`
+- [x] http
+- [x] tls
+- [x] quic
+- [ ] FAKEDNS
 
 Обязательно включить опцию **Route Only**.
 

@@ -10,7 +10,7 @@ ssh-keygen -R <ip>
 
 ## 1. Системное обновление
 
-```bash
+```python
 sudo apt update && sudo apt upgrade -y
 ```
 

@@ -3,7 +3,7 @@
 ## Reset (при необходимости)
 
 ```bash
-ssh-keygen -R <ip>
+ssh-keygen -R <kbd>ip-server</kbd>
 ```
 
 ---

@@ -16,7 +16,7 @@ sudo apt update && sudo apt upgrade -y
 
 ---
 
-## 2. Установка 3x-ui
+## 2. Установка 3x-ui. [Скрипт VLESS](https://github.com/mozaroc/x-ui-pro)
 
 ```bash
 bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no

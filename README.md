@@ -83,16 +83,16 @@ bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -in
 
 Правила обрабатываются **строго сверху вниз**.
 
-| № | Что проверяем | Значение | Тег | Назначение |
+| № | Что проверяем | Значение | Исходящий тег | Назначение |
 |---:|---|---|---|---|
-| **1** | IP | `geoip:ru` | `direct` | Российские IP идут напрямую, без туннеля |
+| **1** | IP | `geoip:ru` | `direct` | Российские IP напрямую, без туннеля |
 | **2** | Domain | `domain:ru`, `domain:su`, `domain:xn--p1ai`, `geosite:category-ru` | `direct` | Российские домены напрямую |
-| **3** | Domain | `geosite:category-ads-all` | `blocked` | Реклама и трекеры — блокировать |
+| **3** | Domain | `geosite:category-ads-all` | `blocked` | Реклама и трекеры |
 | **4** | Network + Port | `UDP` + `443` | `blocked` | Блокировка QUIC/HTTP3, принудительный TCP |
 | **5** | Inbound Tag | `api` | `api` | Служебный API панели |
 | **6** | IP | `geoip:private` | `blocked` | Блокировка приватных IP через сервер |
 | **7** | Protocol | `bittorrent` | `blocked` | Блокировка BitTorrent/P2P |
-| **8** | User | `first` | `warp` | Трафик клиента через Cloudflare WARP |
+| **8** | User / Email | `first` | `warp` | Трафик клиента через Cloudflare WARP |
 
 > Если ни одно правило не совпало — трафик уходит в outbound по умолчанию (WARP).
 

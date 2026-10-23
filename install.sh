@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.7 — Ubuntu/Debian, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.8 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -8,6 +8,7 @@ warn() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 trap 'warn "Ошибка на строке $LINENO (код $?). Проверь вывод выше; автоматического удаления данных нет."' ERR
 [[ $EUID -eq 0 ]] || die 'Запусти через sudo bash install.sh'
+[[ $(uname -m) == 'x86_64' ]] || die 'Эта версия поддерживает только x86_64 (amd64)'
 [[ -r /etc/os-release ]] || die 'Не удалось определить ОС'
 . /etc/os-release
 [[ "${ID:-}" == ubuntu || "${ID:-}" == debian ]] || die 'Поддерживаются Ubuntu и Debian'
@@ -71,7 +72,7 @@ ask EU_IP 'Публичный IPv4 EU сервера' "$(ip -4 -o addr show scop
 valid_ipv4 "$EU_IP" || die 'Неверный публичный EU IP'
 ask EMAIL 'Email для сертификатов Let’s Encrypt'
 EMAIL=${EMAIL//[[:space:]]/}
-[[ "$EMAIL" == *@*.* ]] || die 'Неверный email'
+[[ "$EMAIL" =~ ^[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,}$ ]] || die 'Неверный email. Введи адрес латиницей без пробелов'
 ask RELAY 'IP RU Relay (оставь пустым, если нет)' ''
 if [[ -n "$RELAY" ]]; then valid_ipv4 "$RELAY" || die 'Неверный публичный IPv4 RU Relay'; fi
 ask SSH_PORT 'Твой SSH-порт (только для справки, firewall не меняем)' 22
@@ -112,7 +113,7 @@ else
   fi
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y curl ca-certificates openssl python3 certbot sqlite3
+  apt-get install -y curl ca-certificates openssl python3 certbot sqlite3 nginx-common
   certbot certonly --standalone --preferred-challenges http \
     --non-interactive --agree-tos --email "$EMAIL" \
     --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
@@ -138,15 +139,34 @@ KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Private key|PrivateKey):[[:space:]]*//p' | head -1)
 PUBLIC_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Public key|PublicKey|Password|Password \(PublicKey\)):[[:space:]]*//p' | head -1)
 [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || die 'Не удалось сгенерировать ключи X25519 (неожиданный формат xray x25519)'
-SHORT_ID=$(openssl rand -hex 8)
+SHORT_IDS=$(python3 - <<'PYSHORT'
+import secrets
+print(','.join(secrets.token_hex(8) for _ in range(8)))
+PYSHORT
+)
+SHORT_ID=${SHORT_IDS%%,*}
 CLIENT_UUID=$($XRAY_BIN uuid)
 [[ "$CLIENT_UUID" =~ ^[a-f0-9-]{36}$ ]] || die 'Ошибка генерации UUID'
 HOST_IP=${RELAY:-$EU_IP}
+WS_PORT=$(python3 - <<'PYPORT'
+import secrets
+print(secrets.randbelow(30000)+20000)
+PYPORT
+)
+TROJAN_PORT=$((WS_PORT+1))
+WS_UUID=$($XRAY_BIN uuid)
+XHTTP_UUID=$($XRAY_BIN uuid)
+TROJAN_PASSWORD=$(openssl rand -hex 20)
+WS_PATH=$(openssl rand -hex 8)
+GRPC_PATH=$(openssl rand -hex 8)
+XHTTP_PATH=$(openssl rand -hex 8)
+PANEL_USER="admin$(openssl rand -hex 3)"
+PANEL_PASS=$(openssl rand -hex 18)
 
 # Используем SQLite 3x-ui: конфигурация сохраняется в интерфейсе, а не только в config.json.
 # Перед изменениями обязательно останавливаем службу и делаем бэкап через SQLite backup API.
 systemctl stop x-ui
-export DOMAIN SUBDOMAIN CERT_DIR PRIVATE_KEY PUBLIC_KEY SHORT_ID CLIENT_UUID HOST_IP EU_IP
+export DOMAIN SUBDOMAIN CERT_DIR PRIVATE_KEY PUBLIC_KEY SHORT_ID SHORT_IDS CLIENT_UUID HOST_IP EU_IP WS_PORT TROJAN_PORT WS_UUID XHTTP_UUID TROJAN_PASSWORD WS_PATH GRPC_PATH XHTTP_PATH
 python3 - <<'PY'
 import sqlite3, json, os, time, pathlib, secrets, ipaddress
 p='/etc/x-ui/x-ui.db'
@@ -214,7 +234,8 @@ setting('subJsonURI',jsonpath)
 settings_json={'clients':[{'id':os.environ['CLIENT_UUID'],'flow':'xtls-rprx-vision','email':'user1'}], 'decryption':'none','testseed':[900,500,900,256]}
 stream={'network':'tcp','security':'reality','realitySettings':{
  'show':False,'target':'127.0.0.1:9443','xver':0,'serverNames':[os.environ['DOMAIN']],
- 'privateKey':os.environ['PRIVATE_KEY'],'shortIds':[os.environ['SHORT_ID']],
+ 'privateKey':os.environ['PRIVATE_KEY'],'shortIds':os.environ['SHORT_IDS'].split(','),
+ 'settings':{'publicKey':os.environ['PUBLIC_KEY'],'fingerprint':'firefox','serverName':os.environ['DOMAIN'],'spiderX':'/'},
  'minClientVer':'','maxClientVer':'','maxTimediff':0,'mldsa65Seed':''},
  'tcpSettings':{'acceptProxyProtocol':True,'header':{'type':'none'}}}
 sniff={'enabled':True,'destOverride':['http','tls'],'routeOnly':True}
@@ -248,14 +269,83 @@ if {'uuid','email','flow','enable'} <= clientcols:
  linkcols={r[1] for r in c.execute('PRAGMA table_info(client_inbounds)')}
  if {'client_id','inbound_id'} <= linkcols:
   c.execute('INSERT INTO client_inbounds(client_id,inbound_id) VALUES (?,?)',(client_id,inbound_id))
+# Дополнительные подключения, как в прежней схеме x-ui-pro.
+# WS и Trojan gRPC доступны только через HTTPS/SNI Nginx, XHTTP создаётся выключенным.
+def add_inbound(remark,port,protocol,client_settings,stream_settings,tag,enabled=True):
+ vals={'user_id':1,'up':0,'down':0,'total':0,'remark':remark,'enable':int(enabled),'expiry_time':0,
+       'traffic_reset':'never','listen':'127.0.0.1','port':port,'protocol':protocol,
+       'settings':json.dumps(client_settings),'stream_settings':json.dumps(stream_settings),
+       'tag':tag,'sniffing':json.dumps({'enabled':False,'destOverride':['http','tls']})}
+ vals={k:v for k,v in vals.items() if k in cols_meta}
+ keys=list(vals)
+ c.execute('INSERT INTO inbounds ('+','.join(keys)+') VALUES ('+','.join('?'*len(keys))+')',[vals[k] for k in keys])
+ return c.execute('SELECT last_insert_rowid()').fetchone()[0]
+cols_meta={r[1] for r in c.execute('PRAGMA table_info(inbounds)')}
+def add_host(iid,remark,protocol):
+ data={'inbound_id':iid,'remark':remark,'address':os.environ['SUBDOMAIN'],'port':443,
+       'security':'tls','sni':os.environ['SUBDOMAIN'],'sort_order':0,'allow_insecure':0}
+ data={k:v for k,v in data.items() if k in hostcols}
+ keys=list(data)
+ c.execute('INSERT INTO hosts ('+','.join(keys)+') VALUES ('+','.join('?'*len(keys))+')',[data[k] for k in keys])
+wsport=int(os.environ['WS_PORT']);tp=int(os.environ['TROJAN_PORT'])
+wsid=os.environ['WS_UUID']; xid=os.environ['XHTTP_UUID']
+wspath='/'+str(wsport)+'/'+os.environ['WS_PATH']
+gpath='/'+str(tp)+'/'+os.environ['GRPC_PATH']
+ws=add_inbound('vless-ws',wsport,'vless',{'clients':[{'id':wsid,'email':'ws1'}],'decryption':'none'},
+   {'network':'ws','security':'none','wsSettings':{'path':wspath,'host':os.environ['SUBDOMAIN'],'headers':{}}},
+   'inbound-'+str(wsport))
+add_host(ws,'WebSocket','vless')
+trojan=add_inbound('trojan-grpc',tp,'trojan',
+    {'clients':[{'password':os.environ['TROJAN_PASSWORD'],'email':'trojan1'}],'fallbacks':[]},
+    {'network':'grpc','security':'none','grpcSettings':{'authority':os.environ['SUBDOMAIN'],'serviceName':gpath,'multiMode':False}},
+    'inbound-'+str(tp))
+add_host(trojan,'Trojan gRPC','trojan')
+xhttp=add_inbound('vless-xhttp-disabled',0,'vless',
+    {'clients':[{'id':xid,'email':'xhttp1'}],'decryption':'none'},
+    {'network':'xhttp','security':'none','xhttpSettings':{'path':'/'+os.environ['XHTTP_PATH'],'mode':'packet-up'}},
+    'inbound-xhttp-disabled',False)
+# Регистрация клиентов в новой нормализованной схеме панели.
+if {'uuid','email','flow','enable'} <= clientcols:
+ for cid,email,inb in [(wsid,'ws1',ws),(xid,'xhttp1',xhttp)]:
+  cl={'uuid':cid,'email':email,'flow':'','enable':1}
+  keys=list(cl)
+  c.execute('INSERT INTO clients ('+','.join(keys)+') VALUES ('+','.join('?'*len(keys))+')',[cl[k] for k in keys])
+  if {'client_id','inbound_id'} <= linkcols:
+   c.execute('INSERT INTO client_inbounds(client_id,inbound_id) VALUES (?,?)',(c.execute('SELECT last_insert_rowid()').fetchone()[0],inb))
+ if 'password' in clientcols:
+  cl={'password':os.environ['TROJAN_PASSWORD'],'email':'trojan1','flow':'','enable':1}
+  keys=list(cl)
+  c.execute('INSERT INTO clients ('+','.join(keys)+') VALUES ('+','.join('?'*len(keys))+')',[cl[k] for k in keys])
+  if {'client_id','inbound_id'} <= linkcols:
+   c.execute('INSERT INTO client_inbounds(client_id,inbound_id) VALUES (?,?)',(c.execute('SELECT last_insert_rowid()').fetchone()[0],trojan))
 c.commit()
 path=pathlib.Path('/etc/ru-reality');path.mkdir(mode=0o700,exist_ok=True)
 (path/'state.json').write_text(json.dumps({'domain':os.environ['DOMAIN'],'subdomain':os.environ['SUBDOMAIN'], 'panel_path':base,
  'subscription_path':subpath,'json_path':jsonpath,'public_key':os.environ['PUBLIC_KEY'],'short_id':os.environ['SHORT_ID'],
- 'client_uuid':os.environ['CLIENT_UUID'],'host_ip':os.environ['HOST_IP']},indent=2))
+ 'client_uuid':os.environ['CLIENT_UUID'],'host_ip':os.environ['HOST_IP'],
+ 'ws_port':wsport,'trojan_port':tp,'ws_path':wspath,'grpc_path':gpath},indent=2))
 os.chmod(path/'state.json',0o600)
 c.close()
 PY
+
+# Готовая ссылка REALITY с внешним портом 443, независимо от кнопки Export inbound.
+# В версиях 3x-ui прямой экспорт inbound иногда игнорирует порт из Hosts.
+python3 - <<'PYLINK'
+import json, pathlib, urllib.parse, os
+s=json.load(open('/etc/ru-reality/state.json'))
+params={'type':'tcp','encryption':'none','security':'reality',
+        'pbk':s['public_key'],'fp':'firefox','sni':s['domain'],
+        'sid':s['short_id'],'spx':'/','flow':'xtls-rprx-vision'}
+link='vless://'+s['client_uuid']+'@'+s['host_ip']+':443?'+urllib.parse.urlencode(params)+'#reality'
+out=pathlib.Path('/etc/ru-reality/client-vless.txt');out.write_text(link+'\n');os.chmod(out,0o600)
+PYLINK
+
+# Учётные данные задаются через собственную команду 3x-ui, а не прямой правкой users.
+# В случае ошибки останавливаем установку, чтобы не выдавать неверный пароль.
+/usr/local/x-ui/x-ui setting -username "$PANEL_USER" -password "$PANEL_PASS" -port 23307 -webBasePath "$(python3 -c 'import json;print(json.load(open("/etc/ru-reality/state.json"))["panel_path"])')" >/dev/null \
+  || die 'Не удалось установить логин и пароль 3x-ui'
+printf 'PANEL_USERNAME=%q\nPANEL_PASSWORD=%q\n' "$PANEL_USER" "$PANEL_PASS" > /etc/x-ui/install-result.env
+chmod 600 /etc/x-ui/install-result.env
 
 say 'Создание Nginx stream и HTTPS'
 # Nginx на Ubuntu поставляет stream-модуль отдельным пакетом.
@@ -299,7 +389,7 @@ server {
     location / { try_files \$uri \$uri/ =404; }
 }
 server {
-    listen 127.0.0.1:7443 ssl proxy_protocol;
+    listen 127.0.0.1:7443 ssl http2 proxy_protocol;
     server_name $SUBDOMAIN;
     ssl_certificate $CERT_DIR/fullchain.pem;
     ssl_certificate_key $CERT_DIR/privkey.pem;
@@ -322,6 +412,23 @@ for path,backend in [(base,'http://127.0.0.1:23307'),(s['subscription_path'],'ht
  print('    }')
  print('    location = '+path.rstrip('/')+' { return 301 '+path.rstrip('/')+'/; }')
 PY
+# Только заданные маршруты WS/gRPC. Не используем динамический прокси к произвольным портам.
+python3 - <<'PYNGINX' >> /etc/nginx/sites-available/ru-reality-https
+import json
+s=json.load(open('/etc/ru-reality/state.json'))
+ws=s['ws_path']; g=s['grpc_path'];wp=s['ws_port'];gp=s['trojan_port']
+print('    location ^~ '+ws+' {')
+print('        proxy_http_version 1.1;')
+print('        proxy_set_header Upgrade $http_upgrade;')
+print('        proxy_set_header Connection "upgrade";')
+print('        proxy_set_header Host $host;')
+print('        proxy_pass http://127.0.0.1:'+str(wp)+';')
+print('    }')
+print('    location ^~ '+g+' {')
+print('        grpc_set_header Host $host;')
+print('        grpc_pass grpc://127.0.0.1:'+str(gp)+';')
+print('    }')
+PYNGINX
 cat >> /etc/nginx/sites-available/ru-reality-https <<'EOF'
 }
 EOF
@@ -368,8 +475,26 @@ assert h['fingerprint']=='firefox', 'Fingerprint в Host отличается о
 print('PASS: Inbound custom address:',r['share_addr'])
 print('PASS: Host:',h['address'],h['port'],'fingerprint='+h['fingerprint'])
 PYVERIFY
-if ! ss -lntH | grep -q ':443 '; then warn 'Порт 443 не прослушивается; проверь Nginx'; fi
-if ! ss -lntH | grep -q ':8443 '; then warn 'Порт 8443 не прослушивается; проверь Xray'; fi
+# Xray может стартовать чуть позже systemd — проверяем с ожиданием.
+for port in 443 8443 9443 7443 23307; do
+  ready=0
+  for attempt in {1..20}; do
+    if ss -lntH | awk '{print $4}' | grep -Eq ":${port}$"; then ready=1; break; fi
+    sleep 1
+  done
+  (( ready )) || die "Порт $port не прослушивается. См. journalctl -u x-ui и nginx -t"
+done
+"$XRAY_BIN" run -test -c /usr/local/x-ui/bin/config.json >/dev/null 2>&1 || die 'Конфигурация Xray не проходит проверку'
+# Проверка данных экспорта до объявления успеха.
+python3 - <<'PYVERIFY2'
+import sqlite3,json
+c=sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro',uri=True)
+r=c.execute("SELECT stream_settings FROM inbounds WHERE remark='reality'").fetchone()
+d=json.loads(r[0])['realitySettings']['settings']
+assert d.get('publicKey') and d.get('fingerprint')=='firefox', 'В REALITY отсутствует публичный ключ либо fingerprint'
+assert c.execute('SELECT count(*) FROM inbounds').fetchone()[0] == 4, 'Не все inbounds созданы'
+print('PASS: REALITY publicKey/fingerprint; 4 inbounds')
+PYVERIFY2
 
 say 'ГОТОВО — базовая установка без WARP'
 python3 - <<'PY'
@@ -379,6 +504,7 @@ print('Панель: https://'+s['subdomain']+s['panel_path'])
 print('Адрес клиента: '+s['host_ip']+':443')
 print('SNI: '+s['domain'])
 print('Fingerprint: firefox')
+print('Готовая ссылка клиента: sudo cat /etc/ru-reality/client-vless.txt (секрет!)')
 print('Данные REALITY сохранены: /etc/ru-reality/state.json (только root)')
 print('Учётные данные: проверь вывод официального установщика или команду x-ui (сброс логина/пароля).')
 PY
@@ -387,4 +513,5 @@ if [[ -s /etc/x-ui/install-result.env ]]; then
 fi
 warn 'В панели сертификаты могут отображаться пустыми: HTTPS завершается в Nginx; это ожидаемо.'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'ВНИМАНИЕ: проверен синтаксис, но полная установка на чистом VPS ещё не испытана. После установки проверь вход, Xray, REALITY и подписки.'
+warn 'v0.8 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
+warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'

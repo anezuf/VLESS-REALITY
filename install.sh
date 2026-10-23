@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.5 — Ubuntu/Debian, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.7 — Ubuntu/Debian, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -60,13 +60,17 @@ else
 fi
 
 ask DOMAIN 'Основной домен REALITY (пример: example.com)'
+DOMAIN=${DOMAIN,,}
+SUBDOMAIN_DEFAULT="sub.$DOMAIN"
 valid_domain "$DOMAIN" || die 'Неверный домен'
-ask SUBDOMAIN 'Домен панели и подписок' "sub.$DOMAIN"
+ask SUBDOMAIN 'Домен панели и подписок' "$SUBDOMAIN_DEFAULT"
+SUBDOMAIN=${SUBDOMAIN,,}
 valid_domain "$SUBDOMAIN" || die 'Неверный домен подписок'
 [[ "$DOMAIN" != "$SUBDOMAIN" ]] || die 'Домены должны различаться'
 ask EU_IP 'Публичный IPv4 EU сервера' "$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
 valid_ipv4 "$EU_IP" || die 'Неверный публичный EU IP'
 ask EMAIL 'Email для сертификатов Let’s Encrypt'
+EMAIL=${EMAIL//[[:space:]]/}
 [[ "$EMAIL" == *@*.* ]] || die 'Неверный email'
 ask RELAY 'IP RU Relay (оставь пустым, если нет)' ''
 if [[ -n "$RELAY" ]]; then valid_ipv4 "$RELAY" || die 'Неверный публичный IPv4 RU Relay'; fi
@@ -216,9 +220,11 @@ stream={'network':'tcp','security':'reality','realitySettings':{
 sniff={'enabled':True,'destOverride':['http','tls'],'routeOnly':True}
 cols={r[1] for r in c.execute('PRAGMA table_info(inbounds)')}
 required={'user_id','up','down','total','remark','enable','expiry_time','traffic_reset','listen','port','protocol','settings','stream_settings','tag','sniffing'}
-if not required<=cols: raise RuntimeError('Неизвестная схема таблицы inbounds; обнови установщик')
+if not required|{'share_addr_strategy','share_addr'}<=cols: raise RuntimeError('Нужные поля адреса ссылок отсутствуют в inbounds; установщик рассчитан на 3x-ui 3.10.x')
 values={'user_id':1,'up':0,'down':0,'total':0,'remark':'reality','enable':1,'expiry_time':0,'traffic_reset':'never',
- 'listen':'127.0.0.1','port':8443,'protocol':'vless','settings':json.dumps(settings_json),
+ 'listen':'127.0.0.1','port':8443,'protocol':'vless',
+ 'share_addr_strategy':'custom','share_addr':os.environ['HOST_IP'],
+ 'settings':json.dumps(settings_json),
  'stream_settings':json.dumps(stream),'tag':'in-8443-tcp','sniffing':json.dumps(sniff)}
 cols=list(values)
 c.execute('INSERT INTO inbounds ('+','.join(cols)+') VALUES ('+','.join('?'*len(cols))+')',[values[x] for x in cols])
@@ -345,6 +351,26 @@ systemctl reload nginx
 if ! systemctl is-active --quiet x-ui; then die '3x-ui не запустилась. Проверь journalctl -u x-ui'; fi
 if ! systemctl is-active --quiet nginx; then die 'Nginx не запустился'; fi
 
+say 'Проверка сохранённых настроек и доступности сервисов'
+python3 - <<'PYVERIFY'
+import json,sqlite3,os,sys
+s=json.load(open('/etc/ru-reality/state.json'))
+c=sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro',uri=True)
+c.row_factory=sqlite3.Row
+r=c.execute("SELECT * FROM inbounds WHERE remark='reality' LIMIT 1").fetchone()
+assert r is not None, 'Не создан REALITY inbound'
+assert r['share_addr_strategy']=='custom', 'Стратегия клиентского адреса не custom'
+assert r['share_addr']==s['host_ip'], 'Адрес клиента в inbound неправильный'
+h=c.execute('SELECT * FROM hosts WHERE inbound_id=? LIMIT 1',(r['id'],)).fetchone()
+assert h is not None, 'Не создан Host'
+assert h['address']==s['host_ip'] and int(h['port'])==443, 'Неправильные IP/порт Host'
+assert h['fingerprint']=='firefox', 'Fingerprint в Host отличается от firefox'
+print('PASS: Inbound custom address:',r['share_addr'])
+print('PASS: Host:',h['address'],h['port'],'fingerprint='+h['fingerprint'])
+PYVERIFY
+if ! ss -lntH | grep -q ':443 '; then warn 'Порт 443 не прослушивается; проверь Nginx'; fi
+if ! ss -lntH | grep -q ':8443 '; then warn 'Порт 8443 не прослушивается; проверь Xray'; fi
+
 say 'ГОТОВО — базовая установка без WARP'
 python3 - <<'PY'
 import json
@@ -354,7 +380,11 @@ print('Адрес клиента: '+s['host_ip']+':443')
 print('SNI: '+s['domain'])
 print('Fingerprint: firefox')
 print('Данные REALITY сохранены: /etc/ru-reality/state.json (только root)')
-print('Вход в панель: учётные данные выдал официальный установщик 3x-ui')
+print('Учётные данные: проверь вывод официального установщика или команду x-ui (сброс логина/пароля).')
 PY
+if [[ -s /etc/x-ui/install-result.env ]]; then
+  warn 'Учётные данные, созданные установщиком: sudo cat /etc/x-ui/install-result.env (не отправляй их никому)'
+fi
+warn 'В панели сертификаты могут отображаться пустыми: HTTPS завершается в Nginx; это ожидаемо.'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
 warn 'ВНИМАНИЕ: проверен синтаксис, но полная установка на чистом VPS ещё не испытана. После установки проверь вход, Xray, REALITY и подписки.'

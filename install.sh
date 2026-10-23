@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.3 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.4 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -249,28 +249,39 @@ values={'user_id':1,'up':0,'down':0,'total':0,'remark':'reality','enable':1,'exp
  'share_addr_strategy':'custom','share_addr':os.environ['HOST_IP'],
  'settings':json.dumps(settings_json),
  'stream_settings':json.dumps(stream),'tag':'in-8443-tcp','sniffing':json.dumps(sniff)}
+# В 3x-ui 3.10.x disable_flow контролирует применение Vision в runtime.
+# Если поле существует, явно снимаем блокировку для этого Inbound.
+if 'disable_flow' in cols: values['disable_flow']=0
 cols=list(values)
 c.execute('INSERT INTO inbounds ('+','.join(cols)+') VALUES ('+','.join('?'*len(cols))+')',[values[x] for x in cols])
 inbound_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
-# Hosts: fingerprint firefox и адрес RU Relay доступны для редактирования в UI.
+# Hosts: это та же запись RU Relay, которую раньше приходилось создавать вручную.
+# REALITY Inbound слушает внутри :8443, а Hosts указывает внешний RU_IP:443.
 hostcols={r[1] for r in c.execute('PRAGMA table_info(hosts)')}
 host={'inbound_id':inbound_id,'remark':'RU Relay' if os.environ['HOST_IP']!=os.environ.get('EU_IP','') else 'Direct EU',
       'address':os.environ['HOST_IP'],'port':443,'security':'same','fingerprint':'firefox','sni':os.environ['DOMAIN'],
       'allow_insecure':0,'mihomo_x25519':0,'sort_order':0}
+for enabled_key in ('enable', 'enabled', 'is_enabled'):
+ if enabled_key in hostcols: host[enabled_key]=1
 if not {'inbound_id','address','port','security','fingerprint','sni'} <= hostcols: raise RuntimeError('Неизвестная схема hosts')
 host={k:v for k,v in host.items() if k in hostcols}
 c.execute('INSERT INTO hosts ('+','.join(host)+') VALUES ('+','.join('?'*len(host))+')',list(host.values()))
 # На актуальных версиях 3x-ui клиенты нормализованы. Для несовместимой схемы
 # откатываем изменения базы, не оставляя частично настроенный inbound.
 clientcols={r[1] for r in c.execute('PRAGMA table_info(clients)')}
-if {'uuid','email','flow','enable'} <= clientcols:
- client={'uuid':os.environ['CLIENT_UUID'],'email':'user1','flow':'xtls-rprx-vision','enable':1}
- client={k:v for k,v in client.items() if k in clientcols}
- c.execute('INSERT INTO clients ('+','.join(client)+') VALUES ('+','.join('?'*len(client))+')',list(client.values()))
- client_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
- linkcols={r[1] for r in c.execute('PRAGMA table_info(client_inbounds)')}
- if {'client_id','inbound_id'} <= linkcols:
-  c.execute('INSERT INTO client_inbounds(client_id,inbound_id) VALUES (?,?)',(client_id,inbound_id))
+linkcols={r[1] for r in c.execute('PRAGMA table_info(client_inbounds)')}
+# Именно flow_override оказался необходим в 3x-ui 3.10.2:
+# clients.flow без него сохраняется в базе, но пропадает из Xray config.json.
+if not {'uuid','email','flow','enable'} <= clientcols:
+ raise RuntimeError('Неподдерживаемая схема clients: нельзя создать REALITY Vision')
+if not {'client_id','inbound_id','flow_override'} <= linkcols:
+ raise RuntimeError('Неподдерживаемая схема client_inbounds: нет flow_override для REALITY Vision')
+client={'uuid':os.environ['CLIENT_UUID'],'email':'user1','flow':'xtls-rprx-vision','enable':1}
+client={k:v for k,v in client.items() if k in clientcols}
+c.execute('INSERT INTO clients ('+','.join(client)+') VALUES ('+','.join('?'*len(client))+')',list(client.values()))
+client_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+c.execute('INSERT INTO client_inbounds(client_id,inbound_id,flow_override) VALUES (?,?,?)',
+          (client_id,inbound_id,'xtls-rprx-vision'))
 # Дополнительные подключения, как в прежней схеме x-ui-pro.
 # WS и Trojan gRPC доступны только через HTTPS/SNI Nginx, XHTTP создаётся выключенным.
 def add_inbound(remark,port,protocol,client_settings,stream_settings,tag,enabled=True):
@@ -500,8 +511,18 @@ h=c.execute('SELECT * FROM hosts WHERE inbound_id=? LIMIT 1',(r['id'],)).fetchon
 assert h is not None, 'Не создан Host'
 assert h['address']==s['host_ip'] and int(h['port'])==443, 'Неправильные IP/порт Host'
 assert h['fingerprint']=='firefox', 'Fingerprint в Host отличается от firefox'
+assert h['sni']==s['domain'], 'SNI Host отличается от REALITY SNI'
+for enabled_key in ('enable','enabled','is_enabled'):
+ if enabled_key in h.keys(): assert int(h[enabled_key])==1, 'Host отключён'
+match=c.execute('''SELECT cl.flow, ci.flow_override
+ FROM clients cl JOIN client_inbounds ci ON ci.client_id=cl.id
+ WHERE cl.uuid=? AND ci.inbound_id=?''',(s['client_uuid'],r['id'])).fetchone()
+assert match is not None, 'REALITY-клиент отсутствует в нормализованной схеме'
+assert match['flow']=='xtls-rprx-vision' and match['flow_override']=='xtls-rprx-vision', 'Vision не записан в 3x-ui'
+if 'disable_flow' in r.keys(): assert not r['disable_flow'], 'REALITY flow отключён'
 print('PASS: Inbound custom address:',r['share_addr'])
 print('PASS: Host:',h['address'],h['port'],'fingerprint='+h['fingerprint'])
+print('PASS: 3x-ui clients.flow и client_inbounds.flow_override = xtls-rprx-vision')
 PYVERIFY
 # Xray может стартовать чуть позже systemd — проверяем с ожиданием.
 for port in 443 8443 9443 7443 23307; do
@@ -513,6 +534,20 @@ for port in 443 8443 9443 7443 23307; do
   (( ready )) || die "Порт $port не прослушивается. См. journalctl -u x-ui и nginx -t"
 done
 "$XRAY_BIN" run -test -c /usr/local/x-ui/bin/config.json >/dev/null 2>&1 || die 'Конфигурация Xray не проходит проверку'
+# Проверка *сгенерированной* Xray config.json, а не только базы панели.
+# В v0.9.3 Vision ошибочно отсутствовал здесь, хотя clients.flow был заполнен.
+python3 - <<'PY_RUNTIME_FLOW'
+import json
+state=json.load(open('/etc/ru-reality/state.json'))
+config=json.load(open('/usr/local/x-ui/bin/config.json'))
+realities=[i for i in config.get('inbounds', []) if i.get('port')==8443 and i.get('protocol')=='vless']
+assert len(realities)==1, 'REALITY inbound не найден в рабочем Xray config'
+clients=[c for c in realities[0].get('settings',{}).get('clients',[]) if c.get('id')==state['client_uuid']]
+assert len(clients)==1, 'REALITY-клиент отсутствует в рабочем Xray config'
+assert clients[0].get('flow')=='xtls-rprx-vision', 'Vision отсутствует в рабочем Xray config'
+assert realities[0].get('streamSettings',{}).get('tcpSettings',{}).get('acceptProxyProtocol') is True, 'PROXY protocol отключён'
+print('PASS: Xray runtime: xtls-rprx-vision и PROXY protocol')
+PY_RUNTIME_FLOW
 # Проверяем TLS не только по порту: панель должна реально отдавать HTTPS
 # с сертификатом, подходящим для SUBDOMAIN; Nginx — проксировать его через :443.
 PANEL_PATH=$(python3 -c 'import json;print(json.load(open("/etc/ru-reality/state.json"))["panel_path"])')
@@ -559,5 +594,5 @@ if [[ -s /etc/x-ui/install-result.env ]]; then
 fi
 say 'Сертификаты HTTPS прописаны непосредственно в панели 3x-ui (Settings -> Certificates).'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'v0.9.2 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
+warn 'v0.9.4 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
 warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'

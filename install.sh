@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — initial release (Ubuntu/Debian)
+# VLESS REALITY / 3x-ui installer — v0.2 — Ubuntu/Debian, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -30,11 +30,11 @@ valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
 say 'VLESS REALITY — автоматическая установка 3x-ui + Nginx'
 warn 'Только для чистого VPS. На существующем сервере с VPN/Nginx ничего не переустанавливай.'
-for cmd in curl python3 ip ss systemctl; do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
+for cmd in curl python3 ip ss systemctl getent;  do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
 if systemctl list-unit-files x-ui.service 2>/dev/null | grep -q '^x-ui.service'; then die '3x-ui уже установлена. Остановка для защиты текущих настроек.'; fi
 if [[ -e /etc/x-ui/x-ui.db ]]; then die 'Найдена существующая база 3x-ui. Установка отменена.'; fi
 if [[ -f /etc/nginx/nginx.conf ]]; then die 'Обнаружен установленный Nginx. Скрипт предназначен для чистого сервера.'; fi
-if ss -lntH '( sport = :443 or sport = :8443 or sport = :7443 or sport = :9443 )' 2>/dev/null | grep -q .; then die 'Один из портов 443/8443/7443/9443 уже занят.'; fi
+if ss -lntH '( sport = :80 or sport = :443 or sport = :8443 or sport = :7443 or sport = :9443 or sport = :23307 or sport = :59015 )' 2>/dev/null | grep -q .; then die 'Один из необходимых портов (80/443/8443/7443/9443/23307/59015) занят.'; fi
 
 ask DOMAIN 'Основной домен REALITY (пример: example.com)'
 valid_domain "$DOMAIN" || die 'Неверный домен'
@@ -58,35 +58,38 @@ cat >&3 <<EOF
   Панель/подписки: $SUBDOMAIN → Nginx :7443
   Клиентский адрес: ${RELAY:-публичный IP EU сервера}
   WARP: вручную после установки
-  Firewall: не изменяем (проверь доступность TCP 80/443/7443/SSH)
+  Firewall: не изменяем (проверь TCP 80/443 и SSH; IP RU Relay нужно настроить отдельно)
 
 EOF
 ask CONFIRM 'На ЧИСТОМ VPS начать установку? Напиши YES' ''
 [[ "$CONFIRM" == 'YES' ]] || die 'Отменено'
 
-say 'Установка пакетов'
+say 'Проверка DNS и получение сертификата (standalone)'
+# ACME HTTP-01 требует доступного снаружи TCP 80 и A-записей на EU IP.
+for name in "$DOMAIN" "$SUBDOMAIN"; do
+  if ! getent ahostsv4 "$name" | awk '{print $1}' | sort -u | grep -Fxq "$EU_IP"; then
+    die "Домен $name не указывает на $EU_IP. Настрой DNS A, отключи CDN/Proxy и повтори установку."
+  fi
+done
+if ss -lntH '( sport = :80 )' 2>/dev/null | grep -q .; then
+  die 'TCP 80 занят. Для выдачи сертификата standalone порт 80 должен быть свободен.'
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y curl ca-certificates openssl python3 nginx libnginx-mod-stream certbot sqlite3
-
-# При первичной выдаче сертификата Nginx отвечает на HTTP-01 через webroot.
-mkdir -p /var/www/letsencrypt/.well-known/acme-challenge /var/www/html /etc/nginx/stream-enabled /etc/nginx/sites-enabled
-cat > /etc/nginx/sites-available/ru-reality-acme <<'EOF'
-server {
-    listen 80;
-    listen [::]:80;
-    server_name _;
-    location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
-    location / { return 404; }
-}
-EOF
-ln -s /etc/nginx/sites-available/ru-reality-acme /etc/nginx/sites-enabled/ru-reality-acme
-rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl enable --now nginx && systemctl reload nginx
-say 'Получение сертификатов Let’s Encrypt'
-certbot certonly --webroot -w /var/www/letsencrypt --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" -d "$SUBDOMAIN"
+apt-get install -y curl ca-certificates openssl python3 certbot sqlite3
+# Выпускаем сертификат до установки Nginx, чтобы порт 80 был свободен.
+# Один сертификат SAN покрывает оба домена.
+certbot certonly --standalone --preferred-challenges http \
+  --non-interactive --agree-tos --email "$EMAIL" \
+  --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 [[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Сертификаты не найдены'
+say 'Установка Nginx и stream-модуля'
+apt-get install -y nginx libnginx-mod-stream
+mkdir -p /var/www/html /etc/nginx/stream-enabled /etc/nginx/sites-enabled
+# Отключаем стандартный сайт, он не требуется для REALITY.
+rm -f /etc/nginx/sites-enabled/default
+systemctl stop nginx || true
 
 say 'Установка официальной 3x-ui'
 TMP_INSTALL=$(mktemp)
@@ -144,6 +147,7 @@ if not base.endswith('/'):base+='/'
 setting('webBasePath',base)
 setting('subEnable','true')
 setting('subPort','59015')
+setting('subEnableRouting','false')
 setting('subCertFile',os.path.join(os.environ['CERT_DIR'],'fullchain.pem'))
 setting('subKeyFile',os.path.join(os.environ['CERT_DIR'],'privkey.pem'))
 setting('subDomain',os.environ['SUBDOMAIN'])
@@ -223,6 +227,12 @@ server {
 EOF
 cat > /etc/nginx/sites-available/ru-reality-https <<EOF
 server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN $SUBDOMAIN;
+    return 404;
+}
+server {
     listen 127.0.0.1:9443 ssl;
     server_name $DOMAIN;
     ssl_certificate $CERT_DIR/fullchain.pem;
@@ -258,14 +268,25 @@ cat >> /etc/nginx/sites-available/ru-reality-https <<'EOF'
 }
 EOF
 ln -sf /etc/nginx/sites-available/ru-reality-https /etc/nginx/sites-enabled/ru-reality-https
-mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-cat >/etc/letsencrypt/renewal-hooks/deploy/ru-reality-nginx <<'EOF'
+# Certbot standalone при продлении должен временно освобождать TCP 80.
+# Хуки создаются после первой выдачи и запускаются certbot renew автоматически.
+mkdir -p /etc/letsencrypt/renewal-hooks/{pre,post,deploy}
+cat > /etc/letsencrypt/renewal-hooks/pre/ru-reality-stop-nginx <<'EOF'
 #!/bin/sh
-/usr/sbin/nginx -t && /bin/systemctl reload nginx
+/bin/systemctl stop nginx
+EOF
+cat > /etc/letsencrypt/renewal-hooks/post/ru-reality-start-nginx <<'EOF'
+#!/bin/sh
+/bin/systemctl start nginx
+EOF
+cat > /etc/letsencrypt/renewal-hooks/deploy/ru-reality-xui <<'EOF'
+#!/bin/sh
 /bin/systemctl restart x-ui
 EOF
-chmod 755 /etc/letsencrypt/renewal-hooks/deploy/ru-reality-nginx
+chmod 755 /etc/letsencrypt/renewal-hooks/{pre/ru-reality-stop-nginx,post/ru-reality-start-nginx,deploy/ru-reality-xui}
+systemctl enable --now certbot.timer 2>/dev/null || true
 nginx -t
+systemctl enable --now nginx
 systemctl enable --now x-ui
 systemctl restart x-ui
 systemctl reload nginx
@@ -284,4 +305,4 @@ print('Данные REALITY сохранены: /etc/ru-reality/state.json (то
 print('Вход в панель: учётные данные выдал официальный установщик 3x-ui')
 PY
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'ВАЖНО: первая версия, не проверена на реальном чистом VPS. Проверяй подписки и клиентский inbound перед использованием в продакшене.'
+warn 'ВНИМАНИЕ: проверен синтаксис, но полная установка на чистом VPS ещё не испытана. После установки проверь вход, Xray, REALITY и подписки.'

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.4 — Ubuntu/Debian, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.5 — Ubuntu/Debian, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -179,7 +179,14 @@ tmpl['routing']={'domainStrategy':'IPIfNonMatch','rules':[
  {'type':'field','protocol':['bittorrent'],'outboundTag':'blocked'},
  {'type':'field','domain':['geosite:category-ads-all'],'outboundTag':'blocked'}]}
 def setting(k,v):
- c.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
+ # In 3x-ui 3.10.x settings.key is not necessarily UNIQUE.
+ # UPDATE-first works for both existing and uninitialized installations.
+ value=str(v)
+ exists=c.execute('SELECT id FROM settings WHERE key=? LIMIT 1',(k,)).fetchone()
+ if exists:
+  c.execute('UPDATE settings SET value=? WHERE key=?',(value,k))
+ else:
+  c.execute('INSERT INTO settings(key,value) VALUES (?,?)',(k,value))
 setting('xrayTemplateConfig',json.dumps(tmpl,separators=(',',':')))
 # Панель остаётся только локальной и открывается через Nginx (TLS).
 setting('webListen','127.0.0.1')

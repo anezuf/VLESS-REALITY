@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.2 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -407,7 +407,8 @@ server {
     location / { try_files \$uri \$uri/ =404; }
 }
 server {
-    listen 127.0.0.1:7443 ssl http2 proxy_protocol;
+    listen 127.0.0.1:7443 ssl proxy_protocol;
+    http2 on;
     server_name $SUBDOMAIN;
     ssl_certificate $CERT_DIR/fullchain.pem;
     ssl_certificate_key $CERT_DIR/privkey.pem;
@@ -430,6 +431,7 @@ for path,backend in [(base,'https://127.0.0.1:23307'),(s['subscription_path'],'h
  print('        proxy_ssl_name '+s['subdomain']+';')
  print('        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;')
  print('        proxy_ssl_verify on;')
+ print('        proxy_ssl_verify_depth 4;')
  print('    }')
  print('    location = '+path.rstrip('/')+' { return 301 '+path.rstrip('/')+'/; }')
 PY
@@ -454,6 +456,10 @@ cat >> /etc/nginx/sites-available/ru-reality-https <<'EOF'
 }
 EOF
 ln -sf /etc/nginx/sites-available/ru-reality-https /etc/nginx/sites-enabled/ru-reality-https
+# Резервные копии нельзя хранить в sites-enabled: Nginx читает их как активные конфиги.
+if find /etc/nginx/sites-enabled -maxdepth 1 -type f \( -name '*.bak' -o -name '*~' -o -name '*.save' \) | grep -q .; then
+  die 'В sites-enabled обнаружены резервные копии конфигураций. Перенеси их в /root/nginx-backups и повтори проверку.'
+fi
 # Certbot standalone при продлении должен временно освобождать TCP 80.
 # Хуки создаются после первой выдачи и запускаются certbot renew автоматически.
 mkdir -p /etc/letsencrypt/renewal-hooks/{pre,post,deploy}
@@ -543,5 +549,5 @@ if [[ -s /etc/x-ui/install-result.env ]]; then
 fi
 say 'Сертификаты HTTPS прописаны непосредственно в панели 3x-ui (Settings -> Certificates).'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'v0.9 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
+warn 'v0.9.2 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
 warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'

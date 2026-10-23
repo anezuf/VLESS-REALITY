@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.2 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.3 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -337,7 +337,8 @@ import json, pathlib, urllib.parse, os
 s=json.load(open('/etc/ru-reality/state.json'))
 params={'type':'tcp','encryption':'none','security':'reality',
         'pbk':s['public_key'],'fp':'firefox','sni':s['domain'],
-        'sid':s['short_id'],'spx':'/','flow':'xtls-rprx-vision'}
+        'sid':s['short_id'],'spx':'/','flow':'xtls-rprx-vision',
+        'support-x25519mlkem768':'true'}
 link='vless://'+s['client_uuid']+'@'+s['host_ip']+':443?'+urllib.parse.urlencode(params)+'#reality'
 out=pathlib.Path('/etc/ru-reality/client-vless.txt');out.write_text(link+'\n');os.chmod(out,0o600)
 PYLINK
@@ -529,6 +530,14 @@ r=c.execute("SELECT stream_settings FROM inbounds WHERE remark='reality'").fetch
 d=json.loads(r[0])['realitySettings']['settings']
 assert d.get('publicKey') and d.get('fingerprint')=='firefox', 'В REALITY отсутствует публичный ключ либо fingerprint'
 assert c.execute('SELECT count(*) FROM inbounds').fetchone()[0] == 4, 'Не все inbounds созданы'
+from urllib.parse import urlparse,parse_qs
+uri=open('/etc/ru-reality/client-vless.txt').read().strip()
+u=urlparse(uri);q=parse_qs(u.query)
+state=json.load(open('/etc/ru-reality/state.json'))
+assert u.hostname == state['host_ip'] and u.port == 443, 'Неверный адрес или порт готовой ссылки'
+assert q.get('support-x25519mlkem768') == ['true'], 'Отсутствует флаг ML-KEM для клиента'
+assert q.get('fp') == ['firefox'] and q.get('pbk') == [state['public_key']], 'Неправильные fingerprint/publicKey в ссылке'
+print('PASS: Клиентская ссылка: :443, REALITY publicKey и X25519MLKEM768')
 print('PASS: REALITY publicKey/fingerprint; 4 inbounds')
 PYVERIFY2
 
@@ -541,6 +550,7 @@ print('Адрес клиента: '+s['host_ip']+':443')
 print('SNI: '+s['domain'])
 print('Fingerprint: firefox')
 print('Готовая ссылка клиента: sudo cat /etc/ru-reality/client-vless.txt (секрет!)')
+print('Внимание: прямой экспорт Inbound 3x-ui может показывать внутренний порт 8443; для RU Relay импортируй готовую ссылку с портом 443.')
 print('Данные REALITY сохранены: /etc/ru-reality/state.json (только root)')
 print('Учётные данные: проверь вывод официального установщика или команду x-ui (сброс логина/пароля).')
 PY

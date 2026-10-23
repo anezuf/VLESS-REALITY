@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.2 — Ubuntu/Debian, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.3 — Ubuntu/Debian, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -31,10 +31,33 @@ valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 say 'VLESS REALITY — автоматическая установка 3x-ui + Nginx'
 warn 'Только для чистого VPS. На существующем сервере с VPN/Nginx ничего не переустанавливай.'
 for cmd in curl python3 ip ss systemctl getent;  do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
-if systemctl list-unit-files x-ui.service 2>/dev/null | grep -q '^x-ui.service'; then die '3x-ui уже установлена. Остановка для защиты текущих настроек.'; fi
-if [[ -e /etc/x-ui/x-ui.db ]]; then die 'Найдена существующая база 3x-ui. Установка отменена.'; fi
-if [[ -f /etc/nginx/nginx.conf ]]; then die 'Обнаружен установленный Nginx. Скрипт предназначен для чистого сервера.'; fi
-if ss -lntH '( sport = :80 or sport = :443 or sport = :8443 or sport = :7443 or sport = :9443 or sport = :23307 or sport = :59015 )' 2>/dev/null | grep -q .; then die 'Один из необходимых портов (80/443/8443/7443/9443/23307/59015) занят.'; fi
+# --resume is deliberately opt-in. Only supported for an interrupted *initial*
+# installation after x-ui was installed, before creating any inbounds.
+RESUME=0
+if [[ "${1:-}" == '--resume' ]]; then
+  RESUME=1
+elif [[ $# -gt 0 ]]; then
+  die 'Использование: bash install.sh [--resume]'
+fi
+if (( RESUME )); then
+  [[ -r /etc/x-ui/x-ui.db && -x /usr/local/x-ui/bin/xray-linux-amd64 ]] || die 'Нет установленной 3x-ui/Xray для продолжения'
+  [[ -f /etc/nginx/nginx.conf ]] || die 'Nginx не установлен; --resume неприменим'
+  [[ ! -f /etc/ru-reality/state.json ]] || die 'Предыдущая установка уже создала конфигурацию; --resume запрещён'
+  COUNT=$(python3 - <<'PYSQL'
+import sqlite3
+c=sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro',uri=True)
+print(c.execute('SELECT count(*) FROM inbounds').fetchone()[0])
+PYSQL
+  )
+  [[ "$COUNT" == 0 ]] || die 'Уже есть inbounds — для безопасности --resume запрещён'
+  [[ ! -f /etc/nginx/stream-enabled/ru-reality.conf ]] || die 'Уже есть конфигурация Nginx для RU REALITY; --resume запрещён'
+  warn 'Режим --resume: продолжение прерванной установки. Без переустановки 3x-ui и Certbot.'
+else
+  if systemctl list-unit-files x-ui.service 2>/dev/null | grep -q '^x-ui.service'; then die '3x-ui уже установлена. Для прерванной установки используй --resume.'; fi
+  [[ ! -e /etc/x-ui/x-ui.db ]] || die 'Найдена существующая база 3x-ui. Установка отменена.'
+  [[ ! -f /etc/nginx/nginx.conf ]] || die 'Nginx уже установлен. Для прерванной установки используй --resume.'
+  if ss -lntH '( sport = :80 or sport = :443 or sport = :8443 or sport = :7443 or sport = :9443 or sport = :23307 or sport = :59015 )' 2>/dev/null | grep -q .; then die 'Один из необходимых портов занят.'; fi
+fi
 
 ask DOMAIN 'Основной домен REALITY (пример: example.com)'
 valid_domain "$DOMAIN" || die 'Неверный домен'
@@ -71,40 +94,45 @@ for name in "$DOMAIN" "$SUBDOMAIN"; do
     die "Домен $name не указывает на $EU_IP. Настрой DNS A, отключи CDN/Proxy и повтори установку."
   fi
 done
-if ss -lntH '( sport = :80 )' 2>/dev/null | grep -q .; then
-  die 'TCP 80 занят. Для выдачи сертификата standalone порт 80 должен быть свободен.'
-fi
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y curl ca-certificates openssl python3 certbot sqlite3
-# Выпускаем сертификат до установки Nginx, чтобы порт 80 был свободен.
-# Один сертификат SAN покрывает оба домена.
-certbot certonly --standalone --preferred-challenges http \
-  --non-interactive --agree-tos --email "$EMAIL" \
-  --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
-[[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Сертификаты не найдены'
-say 'Установка Nginx и stream-модуля'
-apt-get install -y nginx libnginx-mod-stream
-mkdir -p /var/www/html /etc/nginx/stream-enabled /etc/nginx/sites-enabled
-# Отключаем стандартный сайт, он не требуется для REALITY.
-rm -f /etc/nginx/sites-enabled/default
-systemctl stop nginx || true
+if (( RESUME )); then
+  [[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Не найдены сертификаты от первой попытки. Проверь введённые домены.'
+  # Verify that the existing cert covers the provided domains.
+  for name in "$DOMAIN" "$SUBDOMAIN"; do
+    openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -ext subjectAltName | grep -Fq "DNS:$name" || die "Сертификат не содержит $name"
+  done
+  warn 'Найдены существующие сертификаты и пустая 3x-ui, продолжаем.'
+else
+  if ss -lntH '( sport = :80 )' 2>/dev/null | grep -q .; then
+    die 'TCP 80 занят. Для выдачи сертификата standalone порт 80 должен быть свободен.'
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y curl ca-certificates openssl python3 certbot sqlite3
+  certbot certonly --standalone --preferred-challenges http \
+    --non-interactive --agree-tos --email "$EMAIL" \
+    --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
+  [[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Сертификаты не найдены'
+  say 'Установка Nginx и stream-модуля'
+  apt-get install -y nginx libnginx-mod-stream
+  mkdir -p /var/www/html /etc/nginx/stream-enabled /etc/nginx/sites-enabled
+  rm -f /etc/nginx/sites-enabled/default
+  systemctl stop nginx || true
 
-say 'Установка официальной 3x-ui'
-TMP_INSTALL=$(mktemp)
-trap 'rm -f "$TMP_INSTALL"' EXIT
-curl -fsSL --retry 3 https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh -o "$TMP_INSTALL"
-# Официальный установщик поддерживает XUI_NONINTERACTIVE=1 и создаёт уникальные реквизиты.
-XUI_NONINTERACTIVE=1 bash "$TMP_INSTALL"
-[[ -f /etc/x-ui/x-ui.db ]] || die 'Официальный установщик не создал базу SQLite'
-[[ -x /usr/local/x-ui/bin/xray-linux-amd64 ]] || die 'Не найден бинарник Xray для amd64 (текущая версия поддерживает только x86_64)'
+  say 'Установка официальной 3x-ui'
+  TMP_INSTALL=$(mktemp)
+  trap 'rm -f "$TMP_INSTALL"' EXIT
+  curl -fsSL --retry 3 https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh -o "$TMP_INSTALL"
+  XUI_NONINTERACTIVE=1 bash "$TMP_INSTALL"
+  [[ -f /etc/x-ui/x-ui.db ]] || die 'Официальный установщик не создал базу SQLite'
+  [[ -x /usr/local/x-ui/bin/xray-linux-amd64 ]] || die 'Не найден бинарник Xray для amd64'
+fi
 
 # Инициализация криптографических параметров без передачи ключей в чат/лог.
 XRAY_BIN=/usr/local/x-ui/bin/xray-linux-amd64
 KEYS=$($XRAY_BIN x25519)
 PRIVATE_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Private key|PrivateKey):[[:space:]]*//p' | head -1)
-PUBLIC_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Public key|PublicKey):[[:space:]]*//p' | head -1)
+PUBLIC_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Public key|PublicKey|Password|Password \(PublicKey\)):[[:space:]]*//p' | head -1)
 [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || die 'Не удалось сгенерировать ключи X25519 (неожиданный формат xray x25519)'
 SHORT_ID=$(openssl rand -hex 8)
 CLIENT_UUID=$($XRAY_BIN uuid)

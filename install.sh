@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.8 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -212,11 +212,13 @@ def setting(k,v):
  else:
   c.execute('INSERT INTO settings(key,value) VALUES (?,?)',(k,value))
 setting('xrayTemplateConfig',json.dumps(tmpl,separators=(',',':')))
-# Панель остаётся только локальной и открывается через Nginx (TLS).
+# Панель остаётся локальной, но использует собственный TLS-сертификат.
+# Эти же пути отображаются в Settings -> Certificates внутри 3x-ui.
 setting('webListen','127.0.0.1')
 setting('webPort','23307')
-setting('webCertFile','')
-setting('webKeyFile','')
+setting('webDomain',os.environ['SUBDOMAIN'])
+setting('webCertFile',os.path.join(os.environ['CERT_DIR'],'fullchain.pem'))
+setting('webKeyFile',os.path.join(os.environ['CERT_DIR'],'privkey.pem'))
 base=settings.get('webBasePath','')
 if not base or base=='/': base='/'+secrets.token_urlsafe(12)+'/'
 if not base.endswith('/'):base+='/'
@@ -344,6 +346,22 @@ PYLINK
 # В случае ошибки останавливаем установку, чтобы не выдавать неверный пароль.
 /usr/local/x-ui/x-ui setting -username "$PANEL_USER" -password "$PANEL_PASS" -port 23307 -webBasePath "$(python3 -c 'import json;print(json.load(open("/etc/ru-reality/state.json"))["panel_path"])')" >/dev/null \
   || die 'Не удалось установить логин и пароль 3x-ui'
+# Настраиваем сертификаты самой панели через штатную команду x-ui, как в 3x-ui-pro.
+# Пути указывают на автоматически обновляемые сертификаты Let's Encrypt.
+/usr/local/x-ui/x-ui cert \
+  -webCert "$CERT_DIR/fullchain.pem" \
+  -webCertKey "$CERT_DIR/privkey.pem" >/dev/null \
+  || die 'Не удалось зарегистрировать SSL-сертификат в настройках 3x-ui'
+# Проверяем фактическую запись в панели до первого запуска Nginx.
+python3 - "$CERT_DIR" <<'PY_CERT_VERIFY'
+import sqlite3,sys
+cert=sys.argv[1]
+db=sqlite3.connect('file:/etc/x-ui/x-ui.db?mode=ro',uri=True)
+s=dict(db.execute('SELECT key,value FROM settings WHERE key IN ("webCertFile", "webKeyFile")'))
+if s.get('webCertFile') != cert+'/fullchain.pem' or s.get('webKeyFile') != cert+'/privkey.pem':
+    raise SystemExit('ERROR: Пути сертификатов не сохранились в настройках панели')
+print('PASS: SSL-сертификаты настроены в самой 3x-ui')
+PY_CERT_VERIFY
 printf 'PANEL_USERNAME=%q\nPANEL_PASSWORD=%q\n' "$PANEL_USER" "$PANEL_PASS" > /etc/x-ui/install-result.env
 chmod 600 /etc/x-ui/install-result.env
 
@@ -400,7 +418,7 @@ python3 - <<'PY' >> /etc/nginx/sites-available/ru-reality-https
 import json
 s=json.load(open('/etc/ru-reality/state.json'))
 base=s['panel_path']
-for path,backend in [(base,'http://127.0.0.1:23307'),(s['subscription_path'],'https://127.0.0.1:59015'),(s['json_path'],'https://127.0.0.1:59015')]:
+for path,backend in [(base,'https://127.0.0.1:23307'),(s['subscription_path'],'https://127.0.0.1:59015'),(s['json_path'],'https://127.0.0.1:59015')]:
  if not path.startswith('/'):path='/'+path
  # prefix match without rewriting original path
  print('    location ^~ '+path.rstrip('/')+'/ {')
@@ -408,7 +426,10 @@ for path,backend in [(base,'http://127.0.0.1:23307'),(s['subscription_path'],'ht
  print('        proxy_set_header X-Forwarded-Proto https;')
  print('        proxy_set_header X-Real-IP $remote_addr;')
  print('        proxy_pass '+backend+';')
- print('        proxy_ssl_verify off;')
+ print('        proxy_ssl_server_name on;')
+ print('        proxy_ssl_name '+s['subdomain']+';')
+ print('        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;')
+ print('        proxy_ssl_verify on;')
  print('    }')
  print('    location = '+path.rstrip('/')+' { return 301 '+path.rstrip('/')+'/; }')
 PY
@@ -485,6 +506,15 @@ for port in 443 8443 9443 7443 23307; do
   (( ready )) || die "Порт $port не прослушивается. См. journalctl -u x-ui и nginx -t"
 done
 "$XRAY_BIN" run -test -c /usr/local/x-ui/bin/config.json >/dev/null 2>&1 || die 'Конфигурация Xray не проходит проверку'
+# Проверяем TLS не только по порту: панель должна реально отдавать HTTPS
+# с сертификатом, подходящим для SUBDOMAIN; Nginx — проксировать его через :443.
+PANEL_PATH=$(python3 -c 'import json;print(json.load(open("/etc/ru-reality/state.json"))["panel_path"])')
+for endpoint in "https://${SUBDOMAIN}:23307${PANEL_PATH}" "https://${SUBDOMAIN}${PANEL_PATH}"; do
+  if ! curl --noproxy '*' -fsSL --max-time 12 --resolve "${SUBDOMAIN}:$( [[ "$endpoint" == *":23307"* ]] && echo 23307 || echo 443 ):127.0.0.1" "$endpoint" -o /dev/null; then
+    die "HTTPS-проверка не пройдена: $endpoint. Проверь сертификат панели и nginx error.log"
+  fi
+done
+say 'PASS: HTTPS самой панели и Nginx :443'
 # Проверка данных экспорта до объявления успеха.
 python3 - <<'PYVERIFY2'
 import sqlite3,json
@@ -511,7 +541,7 @@ PY
 if [[ -s /etc/x-ui/install-result.env ]]; then
   warn 'Учётные данные, созданные установщиком: sudo cat /etc/x-ui/install-result.env (не отправляй их никому)'
 fi
-warn 'В панели сертификаты могут отображаться пустыми: HTTPS завершается в Nginx; это ожидаемо.'
+say 'Сертификаты HTTPS прописаны непосредственно в панели 3x-ui (Settings -> Certificates).'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'v0.8 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
+warn 'v0.9 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
 warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'

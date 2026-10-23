@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# VLESS REALITY / 3x-ui installer — initial release (Ubuntu/Debian)
+set -Eeuo pipefail
+umask 077
+
+say() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
+die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+trap 'warn "Ошибка на строке $LINENO (код $?). Проверь вывод выше; автоматического удаления данных нет."' ERR
+[[ $EUID -eq 0 ]] || die 'Запусти через sudo bash install.sh'
+[[ -r /etc/os-release ]] || die 'Не удалось определить ОС'
+. /etc/os-release
+[[ "${ID:-}" == ubuntu || "${ID:-}" == debian ]] || die 'Поддерживаются Ubuntu и Debian'
+[[ -r /dev/tty && -w /dev/tty ]] || die 'Нужен интерактивный терминал. Сначала скачай файл, затем запусти sudo bash install.sh'
+exec 3<>/dev/tty
+ask() {
+  local __name="$1" question="$2" def="${3:-}" answer
+  if ! IFS= read -r -u 3 -p "$question${def:+ [$def]}: " answer; then die 'Ввод прерван'; fi
+  printf -v "$__name" '%s' "${answer:-$def}"
+}
+valid_domain() { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && "$1" == *.* && ${#1} -le 253 && "$1" != *..* ]]; }
+valid_ipv4() { python3 - "$1" <<'PY'
+import ipaddress,sys
+try:
+ a=ipaddress.IPv4Address(sys.argv[1]); assert a.is_global
+except (ValueError, AssertionError): sys.exit(1)
+PY
+}
+valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+
+say 'VLESS REALITY — автоматическая установка 3x-ui + Nginx'
+warn 'Только для чистого VPS. На существующем сервере с VPN/Nginx ничего не переустанавливай.'
+for cmd in curl python3 ip ss systemctl; do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
+if systemctl list-unit-files x-ui.service 2>/dev/null | grep -q '^x-ui.service'; then die '3x-ui уже установлена. Остановка для защиты текущих настроек.'; fi
+if [[ -e /etc/x-ui/x-ui.db ]]; then die 'Найдена существующая база 3x-ui. Установка отменена.'; fi
+if [[ -f /etc/nginx/nginx.conf ]]; then die 'Обнаружен установленный Nginx. Скрипт предназначен для чистого сервера.'; fi
+if ss -lntH '( sport = :443 or sport = :8443 or sport = :7443 or sport = :9443 )' 2>/dev/null | grep -q .; then die 'Один из портов 443/8443/7443/9443 уже занят.'; fi
+
+ask DOMAIN 'Основной домен REALITY (пример: example.com)'
+valid_domain "$DOMAIN" || die 'Неверный домен'
+ask SUBDOMAIN 'Домен панели и подписок' "sub.$DOMAIN"
+valid_domain "$SUBDOMAIN" || die 'Неверный домен подписок'
+[[ "$DOMAIN" != "$SUBDOMAIN" ]] || die 'Домены должны различаться'
+ask EU_IP 'Публичный IPv4 EU сервера' "$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
+valid_ipv4 "$EU_IP" || die 'Неверный публичный EU IP'
+ask EMAIL 'Email для сертификатов Let’s Encrypt'
+[[ "$EMAIL" == *@*.* ]] || die 'Неверный email'
+ask RELAY 'IP RU Relay (оставь пустым, если нет)' ''
+if [[ -n "$RELAY" ]]; then valid_ipv4 "$RELAY" || die 'Неверный публичный IPv4 RU Relay'; fi
+ask SSH_PORT 'Твой SSH-порт (только для справки, firewall не меняем)' 22
+valid_port "$SSH_PORT" || die 'Неверный SSH-порт'
+
+cat >&3 <<EOF
+
+Будет настроено:
+  REALITY: $DOMAIN → Nginx :443 → Xray :8443
+  TLS Target: https://127.0.0.1:9443
+  Панель/подписки: $SUBDOMAIN → Nginx :7443
+  Клиентский адрес: ${RELAY:-публичный IP EU сервера}
+  WARP: вручную после установки
+  Firewall: не изменяем (проверь доступность TCP 80/443/7443/SSH)
+
+EOF
+ask CONFIRM 'На ЧИСТОМ VPS начать установку? Напиши YES' ''
+[[ "$CONFIRM" == 'YES' ]] || die 'Отменено'
+
+say 'Установка пакетов'
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y curl ca-certificates openssl python3 nginx libnginx-mod-stream certbot sqlite3
+
+# При первичной выдаче сертификата Nginx отвечает на HTTP-01 через webroot.
+mkdir -p /var/www/letsencrypt/.well-known/acme-challenge /var/www/html /etc/nginx/stream-enabled /etc/nginx/sites-enabled
+cat > /etc/nginx/sites-available/ru-reality-acme <<'EOF'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+    location ^~ /.well-known/acme-challenge/ { root /var/www/letsencrypt; }
+    location / { return 404; }
+}
+EOF
+ln -s /etc/nginx/sites-available/ru-reality-acme /etc/nginx/sites-enabled/ru-reality-acme
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl enable --now nginx && systemctl reload nginx
+say 'Получение сертификатов Let’s Encrypt'
+certbot certonly --webroot -w /var/www/letsencrypt --non-interactive --agree-tos --email "$EMAIL" -d "$DOMAIN" -d "$SUBDOMAIN"
+CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
+[[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Сертификаты не найдены'
+
+say 'Установка официальной 3x-ui'
+TMP_INSTALL=$(mktemp)
+trap 'rm -f "$TMP_INSTALL"' EXIT
+curl -fsSL --retry 3 https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh -o "$TMP_INSTALL"
+# Официальный установщик поддерживает XUI_NONINTERACTIVE=1 и создаёт уникальные реквизиты.
+XUI_NONINTERACTIVE=1 bash "$TMP_INSTALL"
+[[ -f /etc/x-ui/x-ui.db ]] || die 'Официальный установщик не создал базу SQLite'
+[[ -x /usr/local/x-ui/bin/xray-linux-amd64 ]] || die 'Не найден бинарник Xray для amd64 (текущая версия поддерживает только x86_64)'
+
+# Инициализация криптографических параметров без передачи ключей в чат/лог.
+XRAY_BIN=/usr/local/x-ui/bin/xray-linux-amd64
+KEYS=$($XRAY_BIN x25519)
+PRIVATE_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Private key|PrivateKey):[[:space:]]*//p' | head -1)
+PUBLIC_KEY=$(printf '%s\n' "$KEYS" | sed -nE 's/^(Public key|PublicKey):[[:space:]]*//p' | head -1)
+[[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || die 'Не удалось сгенерировать ключи X25519 (неожиданный формат xray x25519)'
+SHORT_ID=$(openssl rand -hex 8)
+CLIENT_UUID=$($XRAY_BIN uuid)
+[[ "$CLIENT_UUID" =~ ^[a-f0-9-]{36}$ ]] || die 'Ошибка генерации UUID'
+HOST_IP=${RELAY:-$EU_IP}
+
+# Используем SQLite 3x-ui: конфигурация сохраняется в интерфейсе, а не только в config.json.
+# Перед изменениями обязательно останавливаем службу и делаем бэкап через SQLite backup API.
+systemctl stop x-ui
+export DOMAIN SUBDOMAIN CERT_DIR PRIVATE_KEY PUBLIC_KEY SHORT_ID CLIENT_UUID HOST_IP EU_IP
+python3 - <<'PY'
+import sqlite3, json, os, time, pathlib, secrets, ipaddress
+p='/etc/x-ui/x-ui.db'
+c=sqlite3.connect(p)
+backup=sqlite3.connect(f'/etc/x-ui/x-ui.db.backup-{int(time.time())}')
+c.backup(backup);backup.close()
+settings={k:v for k,v in c.execute('SELECT key,value FROM settings')}
+if 'xrayTemplateConfig' not in settings: raise RuntimeError('xrayTemplateConfig отсутствует: неизвестная схема базы 3x-ui')
+tmpl=json.loads(settings['xrayTemplateConfig'])
+if not isinstance(tmpl,dict): raise RuntimeError('Неожиданный Xray template')
+if c.execute('SELECT count(*) FROM inbounds').fetchone()[0]: raise RuntimeError('База уже содержит inbounds')
+# Исходящий direct остаётся первым, пока пользователь не создаст WARP MASQUE.
+tmpl['outbounds']=[{'tag':'direct','protocol':'freedom','settings':{}}, {'tag':'blocked','protocol':'blackhole','settings':{}}]
+tmpl['routing']={'domainStrategy':'IPIfNonMatch','rules':[
+ {'type':'field','inboundTag':['api'],'outboundTag':'api'},
+ {'type':'field','ip':['geoip:private'],'outboundTag':'blocked'},
+ {'type':'field','protocol':['bittorrent'],'outboundTag':'blocked'},
+ {'type':'field','domain':['geosite:category-ads-all'],'outboundTag':'blocked'}]}
+def setting(k,v):
+ c.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(k,str(v)))
+setting('xrayTemplateConfig',json.dumps(tmpl,separators=(',',':')))
+# Панель остаётся только локальной и открывается через Nginx (TLS).
+setting('webListen','127.0.0.1')
+setting('webPort','23307')
+setting('webCertFile','')
+setting('webKeyFile','')
+base=settings.get('webBasePath','')
+if not base or base=='/': base='/'+secrets.token_urlsafe(12)+'/'
+if not base.endswith('/'):base+='/'
+setting('webBasePath',base)
+setting('subEnable','true')
+setting('subPort','59015')
+setting('subCertFile',os.path.join(os.environ['CERT_DIR'],'fullchain.pem'))
+setting('subKeyFile',os.path.join(os.environ['CERT_DIR'],'privkey.pem'))
+setting('subDomain',os.environ['SUBDOMAIN'])
+subpath=settings.get('subURI') or ('/'+secrets.token_urlsafe(10))
+jsonpath=settings.get('subJsonURI') or ('/'+secrets.token_urlsafe(10))
+setting('subURI',subpath)
+setting('subJsonURI',jsonpath)
+settings_json={'clients':[{'id':os.environ['CLIENT_UUID'],'flow':'xtls-rprx-vision','email':'user1'}], 'decryption':'none','testseed':[900,500,900,256]}
+stream={'network':'tcp','security':'reality','realitySettings':{
+ 'show':False,'target':'127.0.0.1:9443','xver':0,'serverNames':[os.environ['DOMAIN']],
+ 'privateKey':os.environ['PRIVATE_KEY'],'shortIds':[os.environ['SHORT_ID']],
+ 'minClientVer':'','maxClientVer':'','maxTimediff':0,'mldsa65Seed':''},
+ 'tcpSettings':{'acceptProxyProtocol':True,'header':{'type':'none'}}}
+sniff={'enabled':True,'destOverride':['http','tls'],'routeOnly':True}
+cols={r[1] for r in c.execute('PRAGMA table_info(inbounds)')}
+required={'user_id','up','down','total','remark','enable','expiry_time','traffic_reset','listen','port','protocol','settings','stream_settings','tag','sniffing'}
+if not required<=cols: raise RuntimeError('Неизвестная схема таблицы inbounds; обнови установщик')
+values={'user_id':1,'up':0,'down':0,'total':0,'remark':'reality','enable':1,'expiry_time':0,'traffic_reset':'never',
+ 'listen':'127.0.0.1','port':8443,'protocol':'vless','settings':json.dumps(settings_json),
+ 'stream_settings':json.dumps(stream),'tag':'in-8443-tcp','sniffing':json.dumps(sniff)}
+cols=list(values)
+c.execute('INSERT INTO inbounds ('+','.join(cols)+') VALUES ('+','.join('?'*len(cols))+')',[values[x] for x in cols])
+inbound_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+# Hosts: fingerprint firefox и адрес RU Relay доступны для редактирования в UI.
+hostcols={r[1] for r in c.execute('PRAGMA table_info(hosts)')}
+host={'inbound_id':inbound_id,'remark':'RU Relay' if os.environ['HOST_IP']!=os.environ.get('EU_IP','') else 'Direct EU',
+      'address':os.environ['HOST_IP'],'port':443,'security':'same','fingerprint':'firefox','sni':os.environ['DOMAIN'],
+      'allow_insecure':0,'mihomo_x25519':0,'sort_order':0}
+if not {'inbound_id','address','port','security','fingerprint','sni'} <= hostcols: raise RuntimeError('Неизвестная схема hosts')
+host={k:v for k,v in host.items() if k in hostcols}
+c.execute('INSERT INTO hosts ('+','.join(host)+') VALUES ('+','.join('?'*len(host))+')',list(host.values()))
+# На актуальных версиях 3x-ui клиенты нормализованы. Для несовместимой схемы
+# откатываем изменения базы, не оставляя частично настроенный inbound.
+clientcols={r[1] for r in c.execute('PRAGMA table_info(clients)')}
+if {'uuid','email','flow','enable'} <= clientcols:
+ client={'uuid':os.environ['CLIENT_UUID'],'email':'user1','flow':'xtls-rprx-vision','enable':1}
+ client={k:v for k,v in client.items() if k in clientcols}
+ c.execute('INSERT INTO clients ('+','.join(client)+') VALUES ('+','.join('?'*len(client))+')',list(client.values()))
+ client_id=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+ linkcols={r[1] for r in c.execute('PRAGMA table_info(client_inbounds)')}
+ if {'client_id','inbound_id'} <= linkcols:
+  c.execute('INSERT INTO client_inbounds(client_id,inbound_id) VALUES (?,?)',(client_id,inbound_id))
+c.commit()
+path=pathlib.Path('/etc/ru-reality');path.mkdir(mode=0o700,exist_ok=True)
+(path/'state.json').write_text(json.dumps({'domain':os.environ['DOMAIN'],'subdomain':os.environ['SUBDOMAIN'], 'panel_path':base,
+ 'subscription_path':subpath,'json_path':jsonpath,'public_key':os.environ['PUBLIC_KEY'],'short_id':os.environ['SHORT_ID'],
+ 'client_uuid':os.environ['CLIENT_UUID'],'host_ip':os.environ['HOST_IP']},indent=2))
+os.chmod(path/'state.json',0o600)
+c.close()
+PY
+
+say 'Создание Nginx stream и HTTPS'
+# Nginx на Ubuntu поставляет stream-модуль отдельным пакетом.
+if ! grep -qF 'include /etc/nginx/stream-enabled/*.conf;' /etc/nginx/nginx.conf; then
+  cat >> /etc/nginx/nginx.conf <<'EOF'
+
+stream {
+    include /etc/nginx/stream-enabled/*.conf;
+}
+EOF
+fi
+cat > /etc/nginx/stream-enabled/ru-reality.conf <<EOF
+map \$ssl_preread_server_name \$relay_target {
+    hostnames;
+    $SUBDOMAIN subscription_backend;
+    default reality_backend;
+}
+upstream reality_backend { server 127.0.0.1:8443; }
+upstream subscription_backend { server 127.0.0.1:7443; }
+server {
+    listen 443;
+    listen [::]:443;
+    ssl_preread on;
+    proxy_protocol on;
+    proxy_pass \$relay_target;
+}
+EOF
+cat > /etc/nginx/sites-available/ru-reality-https <<EOF
+server {
+    listen 127.0.0.1:9443 ssl;
+    server_name $DOMAIN;
+    ssl_certificate $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    root /var/www/html;
+    location / { try_files \$uri \$uri/ =404; }
+}
+server {
+    listen 127.0.0.1:7443 ssl proxy_protocol;
+    server_name $SUBDOMAIN;
+    ssl_certificate $CERT_DIR/fullchain.pem;
+    ssl_certificate_key $CERT_DIR/privkey.pem;
+    location / { return 404; }
+    # Managed endpoint routes follow below.
+EOF
+python3 - <<'PY' >> /etc/nginx/sites-available/ru-reality-https
+import json
+s=json.load(open('/etc/ru-reality/state.json'))
+base=s['panel_path']
+for path,backend in [(base,'http://127.0.0.1:23307'),(s['subscription_path'],'https://127.0.0.1:59015'),(s['json_path'],'https://127.0.0.1:59015')]:
+ if not path.startswith('/'):path='/'+path
+ # prefix match without rewriting original path
+ print('    location ^~ '+path.rstrip('/')+'/ {')
+ print('        proxy_set_header Host $host;')
+ print('        proxy_set_header X-Forwarded-Proto https;')
+ print('        proxy_set_header X-Real-IP $remote_addr;')
+ print('        proxy_pass '+backend+';')
+ print('        proxy_ssl_verify off;')
+ print('    }')
+ print('    location = '+path.rstrip('/')+' { return 301 '+path.rstrip('/')+'/; }')
+PY
+cat >> /etc/nginx/sites-available/ru-reality-https <<'EOF'
+}
+EOF
+ln -sf /etc/nginx/sites-available/ru-reality-https /etc/nginx/sites-enabled/ru-reality-https
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat >/etc/letsencrypt/renewal-hooks/deploy/ru-reality-nginx <<'EOF'
+#!/bin/sh
+/usr/sbin/nginx -t && /bin/systemctl reload nginx
+/bin/systemctl restart x-ui
+EOF
+chmod 755 /etc/letsencrypt/renewal-hooks/deploy/ru-reality-nginx
+nginx -t
+systemctl enable --now x-ui
+systemctl restart x-ui
+systemctl reload nginx
+if ! systemctl is-active --quiet x-ui; then die '3x-ui не запустилась. Проверь journalctl -u x-ui'; fi
+if ! systemctl is-active --quiet nginx; then die 'Nginx не запустился'; fi
+
+say 'ГОТОВО — базовая установка без WARP'
+python3 - <<'PY'
+import json
+s=json.load(open('/etc/ru-reality/state.json'))
+print('Панель: https://'+s['subdomain']+s['panel_path'])
+print('Адрес клиента: '+s['host_ip']+':443')
+print('SNI: '+s['domain'])
+print('Fingerprint: firefox')
+print('Данные REALITY сохранены: /etc/ru-reality/state.json (только root)')
+print('Вход в панель: учётные данные выдал официальный установщик 3x-ui')
+PY
+warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
+warn 'ВАЖНО: первая версия, не проверена на реальном чистом VPS. Проверяй подписки и клиентский inbound перед использованием в продакшене.'

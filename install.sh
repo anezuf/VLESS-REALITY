@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.3 — Ubuntu/Debian, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.4 — Ubuntu/Debian, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -150,9 +150,26 @@ c=sqlite3.connect(p)
 backup=sqlite3.connect(f'/etc/x-ui/x-ui.db.backup-{int(time.time())}')
 c.backup(backup);backup.close()
 settings={k:v for k,v in c.execute('SELECT key,value FROM settings')}
-if 'xrayTemplateConfig' not in settings: raise RuntimeError('xrayTemplateConfig отсутствует: неизвестная схема базы 3x-ui')
-tmpl=json.loads(settings['xrayTemplateConfig'])
-if not isinstance(tmpl,dict): raise RuntimeError('Неожиданный Xray template')
+# На чистой 3x-ui панель может ещё не создать xrayTemplateConfig.
+# Создаём базовый шаблон только при его отсутствии (существующий не затираем).
+raw_template=settings.get('xrayTemplateConfig')
+if raw_template and raw_template.strip():
+ tmpl=json.loads(raw_template)
+ if not isinstance(tmpl,dict): raise RuntimeError('Неожиданный Xray template')
+ print('Используем существующий шаблон Xray из 3x-ui')
+else:
+ tmpl={
+  'log':{'access':'none','dnsLog':False,'error':'','loglevel':'warning','maskAddress':''},
+  'routing':{'domainStrategy':'IPIfNonMatch','rules':[]},
+  'outbounds':[],
+  'policy':{
+   'levels':{'0':{'statsUserDownlink':True,'statsUserOnline':True,'statsUserUplink':True}},
+   'system':{'statsInboundDownlink':True,'statsInboundUplink':True,
+             'statsOutboundDownlink':False,'statsOutboundUplink':False}
+  },
+  'stats':{}
+ }
+ print('Создаём исходный шаблон Xray для новой 3x-ui')
 if c.execute('SELECT count(*) FROM inbounds').fetchone()[0]: raise RuntimeError('База уже содержит inbounds')
 # Исходящий direct остаётся первым, пока пользователь не создаст WARP MASQUE.
 tmpl['outbounds']=[{'tag':'direct','protocol':'freedom','settings':{}}, {'tag':'blocked','protocol':'blackhole','settings':{}}]

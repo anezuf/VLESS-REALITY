@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.7 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.8 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -46,38 +46,50 @@ valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
 # Удаление выполняется только на EU-сервере. RU Relay и правила UFW/iptables не затрагиваются.
 uninstall_stack() {
-  local purge_packages="${1:-0}" meta='/etc/ru-reality/install-meta.json'
+  local purge_packages="${1:-0}" orphan_nginx="${2:-0}" meta='/etc/ru-reality/install-meta.json'
   local state='/etc/ru-reality/state.json' conf='/etc/nginx/sites-available/ru-reality-https'
   local stream='/etc/nginx/stream-enabled/ru-reality.conf' info domain subdomain confirm_delete
   local -a purge_list=()
 
-  # Повторный запуск удаления после успешно завершённого --uninstall
-  # не должен приводить к ошибке или случайному удалению чужих служб.
-  if [[ ! -r "$meta" && ! -r "$state" ]]; then
-    say 'Данных VLESS-REALITY нет; удалять нечего (возможно, уже удалено).'
+  # Частично прерванные старые версии могли не создать install-meta.json.
+  # Отдельно определяем оставшиеся компоненты по уникальным именам файлов.
+  local owned_files=0
+  [[ -r "$meta" || -r "$state" ]] && owned_files=1
+  [[ -f "$conf" ]] && grep -q 'Managed endpoint routes follow below' "$conf" && owned_files=1
+  [[ -f "$stream" ]] && grep -q 'relay_target' "$stream" && owned_files=1
+  if [[ -d /etc/x-ui || -d /usr/local/x-ui ]]; then owned_files=1; fi
+  if (( ! owned_files && ! orphan_nginx )); then
+    if [[ -f /etc/nginx/nginx.conf ]]; then
+      warn 'VPN-маркеры отсутствуют, однако Nginx установлен. Его происхождение не установить.'
+      warn 'На выделенном чистом EU VPS можно использовать: --uninstall --purge-packages --clean-orphan-nginx'
+    else
+      say 'Данных VLESS-REALITY нет; удалять нечего (возможно, уже удалено).'
+    fi
     return 0
   fi
-  info=$(python3 - "$meta" "$state" <<'PY_UNINSTALL_INFO'
-import json,sys,re
+  domain='' subdomain=''
+  if [[ -r "$meta" || -r "$state" ]]; then
+    info=$(python3 - "$meta" "$state" <<'PY_UNINSTALL_INFO'
+import json,sys,re,os
 meta,st=sys.argv[1:]
 try:
-    data=json.load(open(meta if __import__('os').path.isfile(meta) else st))
+    data=json.load(open(meta if os.path.isfile(meta) else st))
     domain=data['domain']; sub=data.get('subdomain','')
     if not re.fullmatch(r'[a-zA-Z0-9.-]{3,253}',domain) or '..' in domain: raise ValueError('bad domain')
-    print(domain)
-    print(sub)
+    print(domain); print(sub)
 except Exception as e:
     print('Ошибка чтения данных установки:',e,file=sys.stderr)
     sys.exit(1)
 PY_UNINSTALL_INFO
-  ) || die 'Не удалось прочитать домен установки — удаление остановлено.'
-  domain=${info%%$'\n'*}
-  subdomain=${info#*$'\n'}
-  [[ "$subdomain" != "$info" ]] || subdomain='неизвестен'
+    ) || die 'Не удалось прочитать домен установки — удаление остановлено.'
+    domain=${info%%$'\n'*}
+    subdomain=${info#*$'\n'}
+    [[ "$subdomain" != "$info" ]] || subdomain='неизвестен'
+  fi
 
   # Для версий, предшествующих install-meta.json, обязательно сверяем созданную
   # именно этим установщиком конфигурацию, а не удаляем произвольную 3x-ui.
-  if [[ ! -f "$meta" ]]; then
+  if [[ ! -f "$meta" && -r "$state" ]]; then
     [[ -f "$conf" && -f "$stream" ]] || die 'Для старой установки отсутствуют ожидаемые конфиги Nginx. Автоудаление остановлено.'
     grep -q 'Managed endpoint routes follow below' "$conf" || die 'Не удалось подтвердить принадлежность HTTPS-конфига.'
     grep -q 'relay_target' "$stream" || die 'Не удалось подтвердить принадлежность stream-конфига.'
@@ -86,7 +98,11 @@ PY_UNINSTALL_INFO
   say 'Полное удаление VLESS-REALITY на ЭТОМ EU-сервере'
   printf 'Будут удалены: 3x-ui/Xray со ВСЕМИ клиентами и настройками,\n'
   printf '  собственные конфигурации Nginx, данные /etc/ru-reality,\n'
-  printf '  сертификат Certbot для %s (и %s), хуки продления.\n' "$domain" "$subdomain"
+  if [[ -n "$domain" ]]; then
+    printf '  сертификат Certbot для %s (и %s), хуки продления.\n' "$domain" "$subdomain"
+  else
+    printf '  Сертификаты без сведений о домене не трогаем (нет маркера установки).\n'
+  fi
   printf 'Не трогаем: SSH, UFW/iptables, RU Relay на другом сервере.\n'
   if (( purge_packages )); then
     [[ -r "$meta" ]] || warn 'Нет данных о пакетах: удалим VPN без удаления системных пакетов.'
@@ -95,7 +111,11 @@ PY_UNINSTALL_INFO
     warn 'Пакеты Nginx, Certbot, Fail2ban и общие системные зависимости останутся установленными.'
   fi
   warn 'Действие необратимо. Сделай резервные копии своих данных, если они нужны.'
-  ask confirm_delete 'Для удаления введи DELETE' ''
+  if (( orphan_nginx )); then
+    [[ "$purge_packages" == 1 ]] || die '--clean-orphan-nginx требует --purge-packages'
+    warn 'Режим только для выделенного EU VPS: дополнительно удалит Nginx, если нет других сайтов.'
+  fi
+  ask confirm_delete 'Для удаления введи DELETE' '' 
   [[ "$confirm_delete" == DELETE ]] || die 'Отмена удаления'
 
   # Не блокируем удаление VPN из-за чужих или оставшихся от пакетов Nginx
@@ -160,7 +180,7 @@ PY_NGINX_CLEAN
   rm -f -- /etc/letsencrypt/renewal-hooks/pre/ru-reality-stop-nginx \
     /etc/letsencrypt/renewal-hooks/post/ru-reality-start-nginx \
     /etc/letsencrypt/renewal-hooks/deploy/ru-reality-xui
-  if [[ -f "/etc/letsencrypt/renewal/${domain}.conf" ]]; then
+  if [[ -n "$domain" && -f "/etc/letsencrypt/renewal/${domain}.conf" ]]; then
     if command -v certbot >/dev/null 2>&1; then
       certbot delete --non-interactive --cert-name "$domain" || warn "Certbot не смог удалить сертификат $domain; проверь вручную."
     else
@@ -175,6 +195,24 @@ PY_NGINX_CLEAN
   systemctl reload fail2ban 2>/dev/null || true
 
   rm -rf -- /etc/ru-reality
+
+  if (( orphan_nginx )); then
+    # Fail closed: не удаляем Nginx при наличии каких-либо не-стандартных сайтов.
+    local site has_other=0
+    for site in /etc/nginx/sites-enabled/* /etc/nginx/sites-available/* /etc/nginx/conf.d/*.conf /etc/nginx/stream-enabled/*.conf; do
+      [[ -e "$site" || -L "$site" ]] || continue
+      case "$site" in
+        /etc/nginx/sites-enabled/default|/etc/nginx/sites-available/default) ;;
+        *) has_other=1 ;;
+      esac
+    done
+    if (( has_other )); then
+      warn 'Обнаружены другие конфигурации Nginx. Системные пакеты Nginx не удалены.'
+    else
+      systemctl disable --now nginx 2>/dev/null || true
+      DEBIAN_FRONTEND=noninteractive apt-get purge -y nginx nginx-common nginx-core nginx-full libnginx-mod-stream 2>/dev/null || warn 'Не удалось удалить все Nginx-пакеты; проверь dpkg -l'
+    fi
+  fi
 
   if (( purge_packages )) && (( ${#purge_list[@]} > 0 )); then
     say 'Проверка и удаление системных пакетов, поставленных установщиком'
@@ -210,8 +248,16 @@ PY_NGINX_CLEAN
 }
 
 if [[ "${1:-}" == '--uninstall' ]]; then
-  [[ $# -le 2 && ( $# -eq 1 || "${2:-}" == '--purge-packages' ) ]] || die 'Использование: bash install.sh --uninstall [--purge-packages]'
-  uninstall_stack "$([[ "${2:-}" == '--purge-packages' ]] && echo 1 || echo 0)"
+  [[ $# -le 3 ]] || die 'Использование: bash install.sh --uninstall [--purge-packages] [--clean-orphan-nginx]'
+  PURGE=0; ORPHAN=0
+  for arg in "${@:2}"; do
+    case "$arg" in
+      --purge-packages) PURGE=1 ;;
+      --clean-orphan-nginx) ORPHAN=1 ;;
+      *) die "Неизвестный параметр удаления: $arg" ;;
+    esac
+  done
+  uninstall_stack "$PURGE" "$ORPHAN"
   exit 0
 fi
 

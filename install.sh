@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.4 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.5 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -29,6 +29,157 @@ PY
 }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
 
+# Удаление выполняется только на EU-сервере. RU Relay и правила UFW/iptables не затрагиваются.
+uninstall_stack() {
+  local purge_packages="${1:-0}" meta='/etc/ru-reality/install-meta.json'
+  local state='/etc/ru-reality/state.json' conf='/etc/nginx/sites-available/ru-reality-https'
+  local stream='/etc/nginx/stream-enabled/ru-reality.conf' info domain subdomain confirm_delete
+  local -a purge_list=()
+
+  [[ -r "$meta" || -r "$state" ]] || die 'Не найдено признаков установки VLESS-REALITY (/etc/ru-reality). Автоудаление запрещено.'
+  info=$(python3 - "$meta" "$state" <<'PY_UNINSTALL_INFO'
+import json,sys,re
+meta,st=sys.argv[1:]
+try:
+    data=json.load(open(meta if __import__('os').path.isfile(meta) else st))
+    domain=data['domain']; sub=data.get('subdomain','')
+    if not re.fullmatch(r'[a-zA-Z0-9.-]{3,253}',domain) or '..' in domain: raise ValueError('bad domain')
+    print(domain)
+    print(sub)
+except Exception as e:
+    print('Ошибка чтения данных установки:',e,file=sys.stderr)
+    sys.exit(1)
+PY_UNINSTALL_INFO
+  ) || die 'Не удалось прочитать домен установки — удаление остановлено.'
+  domain=${info%%$'\n'*}
+  subdomain=${info#*$'\n'}
+  [[ "$subdomain" != "$info" ]] || subdomain='неизвестен'
+
+  # Для версий, предшествующих install-meta.json, обязательно сверяем созданную
+  # именно этим установщиком конфигурацию, а не удаляем произвольную 3x-ui.
+  if [[ ! -f "$meta" ]]; then
+    [[ -f "$conf" && -f "$stream" ]] || die 'Для старой установки отсутствуют ожидаемые конфиги Nginx. Автоудаление остановлено.'
+    grep -q 'Managed endpoint routes follow below' "$conf" || die 'Не удалось подтвердить принадлежность HTTPS-конфига.'
+    grep -q 'relay_target' "$stream" || die 'Не удалось подтвердить принадлежность stream-конфига.'
+  fi
+
+  say 'Полное удаление VLESS-REALITY на ЭТОМ EU-сервере'
+  printf 'Будут удалены: 3x-ui/Xray со ВСЕМИ клиентами и настройками,\n'
+  printf '  собственные конфигурации Nginx, данные /etc/ru-reality,\n'
+  printf '  сертификат Certbot для %s (и %s), хуки продления.\n' "$domain" "$subdomain"
+  printf 'Не трогаем: SSH, UFW/iptables, RU Relay на другом сервере.\n'
+  if (( purge_packages )); then
+    [[ -r "$meta" ]] || die '--purge-packages разрешён только для новых установок, которые сохранили состав пакетов.'
+    warn 'Дополнительно будут удалены пакеты, поставленные только этим скриптом, если не используются другие сайты.'
+  else
+    warn 'Пакеты Nginx, Certbot, Fail2ban и общие системные зависимости останутся установленными.'
+  fi
+  warn 'Действие необратимо. Сделай резервные копии своих данных, если они нужны.'
+  ask confirm_delete 'Для удаления введи DELETE' ''
+  [[ "$confirm_delete" == DELETE ]] || die 'Отмена удаления'
+
+  # Проверяем возможность безопасного удаления ПО до изменения файлов.
+  if (( purge_packages )); then
+    local external_nginx=0 path
+    for path in /etc/nginx/sites-enabled/* /etc/nginx/stream-enabled/* /etc/nginx/conf.d/*.conf; do
+      [[ -e "$path" || -L "$path" ]] || continue
+      case "$path" in
+        /etc/nginx/sites-enabled/ru-reality-https|/etc/nginx/stream-enabled/ru-reality.conf) ;;
+        *) external_nginx=1 ;;
+      esac
+    done
+    (( external_nginx == 0 )) || die 'Есть другие конфигурации Nginx; отказываюсь удалять его пакеты. Используй только --uninstall.'
+    mapfile -t purge_list < <(python3 - "$meta" <<'PY_PACKAGE_LIST'
+import json,sys
+m=json.load(open(sys.argv[1]))
+allowed={'nginx','nginx-common','libnginx-mod-stream','certbot','fail2ban'}
+for p in m.get('packages_missing_before',[]):
+    if p in allowed: print(p)
+PY_PACKAGE_LIST
+)
+  fi
+
+  say 'Остановка и удаление 3x-ui / Xray'
+  systemctl disable --now x-ui.service 2>/dev/null || true
+  # Удаляем только unit, который указывает на установленный нами x-ui.
+  for unit in /etc/systemd/system/x-ui.service /lib/systemd/system/x-ui.service /usr/lib/systemd/system/x-ui.service; do
+    if [[ -f "$unit" ]] && grep -q '/usr/local/x-ui/' "$unit"; then rm -f -- "$unit"; fi
+  done
+  for cli in /usr/bin/x-ui /usr/local/bin/x-ui; do
+    if [[ -L "$cli" ]]; then
+      target=$(readlink -f "$cli" 2>/dev/null || true)
+      if [[ "$target" == /usr/local/x-ui/* ]]; then rm -f -- "$cli"; fi
+    elif [[ -f "$cli" ]] && grep -q '/usr/local/x-ui/' "$cli"; then
+      rm -f -- "$cli"
+    fi
+  done
+  rm -rf -- /usr/local/x-ui /etc/x-ui
+  systemctl daemon-reload || true
+
+  say 'Удаление собственных конфигураций Nginx'
+  if [[ -f "$conf" ]] && grep -q 'Managed endpoint routes follow below' "$conf"; then
+    if [[ -L /etc/nginx/sites-enabled/ru-reality-https ]] &&
+       [[ "$(readlink -f /etc/nginx/sites-enabled/ru-reality-https)" == "$conf" ]]; then
+      rm -f -- /etc/nginx/sites-enabled/ru-reality-https
+    fi
+    rm -f -- "$conf"
+  fi
+  if [[ -f "$stream" ]] && grep -q 'relay_target' "$stream"; then
+    rm -f -- "$stream"
+  fi
+  # Возвращаем nginx.conf в исходное состояние только если наш stream-блок пуст.
+  if [[ -f /etc/nginx/nginx.conf ]]; then
+    python3 - <<'PY_NGINX_CLEAN'
+from pathlib import Path
+p=Path('/etc/nginx/nginx.conf')
+s=p.read_text()
+block='\nstream {\n    include /etc/nginx/stream-enabled/*.conf;\n}\n'
+other=list(Path('/etc/nginx/stream-enabled').glob('*.conf')) if Path('/etc/nginx/stream-enabled').is_dir() else []
+if not other and block in s:
+    p.write_text(s.replace(block,'\n',1))
+    print('PASS: Добавленный stream-блок удалён из nginx.conf')
+PY_NGINX_CLEAN
+    if command -v nginx >/dev/null 2>&1; then
+      nginx -t && systemctl reload nginx || warn 'Nginx следует проверить вручную: nginx -t'
+    fi
+  fi
+
+  say 'Удаление сертификата и хуков продления'
+  rm -f -- /etc/letsencrypt/renewal-hooks/pre/ru-reality-stop-nginx \
+    /etc/letsencrypt/renewal-hooks/post/ru-reality-start-nginx \
+    /etc/letsencrypt/renewal-hooks/deploy/ru-reality-xui
+  if [[ -f "/etc/letsencrypt/renewal/${domain}.conf" ]]; then
+    if command -v certbot >/dev/null 2>&1; then
+      certbot delete --non-interactive --cert-name "$domain" || warn "Certbot не смог удалить сертификат $domain; проверь вручную."
+    else
+      warn "Certbot отсутствует, сертификат $domain не удалён."
+    fi
+  fi
+  # Конфиги Fail2ban, названные в честь x-ui, удаляем, не меняя чужие jail.
+  for d in /etc/fail2ban/jail.d /etc/fail2ban/filter.d; do
+    [[ -d "$d" ]] || continue
+    find "$d" -maxdepth 1 -type f \( -iname '*x-ui*' -o -iname '*3x-ui*' \) -delete
+  done
+  systemctl reload fail2ban 2>/dev/null || true
+
+  rm -rf -- /etc/ru-reality
+
+  if (( purge_packages )) && (( ${#purge_list[@]} > 0 )); then
+    say 'Удаление установленных скриптом пакетов (явный режим)'
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${purge_list[@]}" || warn 'Проверь пакеты: apt-get purge завершился с ошибкой.'
+    # apt autoremove намеренно не вызываем: он может затронуть другое ПО.
+  fi
+  say 'Удаление завершено'
+  warn 'Файл install.sh, скачанный пользователем, удали отдельно: rm -f install.sh'
+  warn 'Текущие VPN-подключения после удаления будут недоступны.'
+}
+
+if [[ "${1:-}" == '--uninstall' ]]; then
+  [[ $# -le 2 && ( $# -eq 1 || "${2:-}" == '--purge-packages' ) ]] || die 'Использование: bash install.sh --uninstall [--purge-packages]'
+  uninstall_stack "$([[ "${2:-}" == '--purge-packages' ]] && echo 1 || echo 0)"
+  exit 0
+fi
+
 say 'VLESS REALITY — автоматическая установка 3x-ui + Nginx'
 warn 'Только для чистого VPS. На существующем сервере с VPN/Nginx ничего не переустанавливай.'
 for cmd in curl python3 ip ss systemctl getent;  do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
@@ -38,7 +189,7 @@ RESUME=0
 if [[ "${1:-}" == '--resume' ]]; then
   RESUME=1
 elif [[ $# -gt 0 ]]; then
-  die 'Использование: bash install.sh [--resume]'
+  die 'Использование: bash install.sh [--resume|--uninstall [--purge-packages]]'
 fi
 if (( RESUME )); then
   [[ -r /etc/x-ui/x-ui.db && -x /usr/local/x-ui/bin/xray-linux-amd64 ]] || die 'Нет установленной 3x-ui/Xray для продолжения'
@@ -70,9 +221,8 @@ valid_domain "$SUBDOMAIN" || die 'Неверный домен подписок'
 [[ "$DOMAIN" != "$SUBDOMAIN" ]] || die 'Домены должны различаться'
 ask EU_IP 'Публичный IPv4 EU сервера' "$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
 valid_ipv4 "$EU_IP" || die 'Неверный публичный EU IP'
-ask EMAIL 'Email для сертификатов Let’s Encrypt'
-EMAIL=${EMAIL//[[:space:]]/}
-[[ "$EMAIL" =~ ^[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9][A-Za-z0-9.\-]*\.[A-Za-z]{2,}$ ]] || die 'Неверный email. Введи адрес латиницей без пробелов'
+# Фиксированный email для ACME; пользователь не вводит адрес.
+EMAIL='example@gmail.com'
 ask RELAY 'IP RU Relay (оставь пустым, если нет)' ''
 if [[ -n "$RELAY" ]]; then valid_ipv4 "$RELAY" || die 'Неверный публичный IPv4 RU Relay'; fi
 ask SSH_PORT 'Твой SSH-порт (только для справки, firewall не меняем)' 22
@@ -91,6 +241,26 @@ cat >&3 <<EOF
 EOF
 ask CONFIRM 'На ЧИСТОМ VPS начать установку? Напиши YES' ''
 [[ "$CONFIRM" == 'YES' ]] || die 'Отменено'
+
+# Маркер установки: нужен для безопасного удаления даже после сбоя на Certbot.
+if (( ! RESUME )); then
+  mkdir -p /etc/ru-reality
+  export DOMAIN SUBDOMAIN
+  python3 - <<'PY_INSTALL_META'
+import json,os,subprocess,pathlib
+packages=['nginx','nginx-common','libnginx-mod-stream','certbot','fail2ban']
+missing=[]
+for package in packages:
+    proc=subprocess.run(['dpkg-query','-W','-f=${Status}',package],capture_output=True,text=True)
+    if proc.returncode != 0 or 'install ok installed' not in proc.stdout:
+        missing.append(package)
+path=pathlib.Path('/etc/ru-reality/install-meta.json')
+path.write_text(json.dumps({'domain':os.environ['DOMAIN'],
+                            'subdomain':os.environ['SUBDOMAIN'],
+                            'packages_missing_before':missing},indent=2)+'\n')
+path.chmod(0o600)
+PY_INSTALL_META
+fi
 
 say 'Проверка DNS и получение сертификата (standalone)'
 # ACME HTTP-01 требует доступного снаружи TCP 80 и A-записей на EU IP.
@@ -594,5 +764,5 @@ if [[ -s /etc/x-ui/install-result.env ]]; then
 fi
 say 'Сертификаты HTTPS прописаны непосредственно в панели 3x-ui (Settings -> Certificates).'
 warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'v0.9.4 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
+warn 'v0.9.5 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
 warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'

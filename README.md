@@ -8,6 +8,20 @@ ssh-keygen -R <ip-server>
 
 ---
 
+## 0. Полная установка скриптом
+
+```bash
+apt-get update && apt-get install -y curl && curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh && bash install.sh
+```
+
+## 0. Полная удаление
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh && bash install.sh --uninstall --purge-packages
+```
+
+---
+
 ## 1. Системное обновление
 
 ```bash

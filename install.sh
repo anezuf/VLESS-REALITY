@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.6 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.7 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -51,7 +51,12 @@ uninstall_stack() {
   local stream='/etc/nginx/stream-enabled/ru-reality.conf' info domain subdomain confirm_delete
   local -a purge_list=()
 
-  [[ -r "$meta" || -r "$state" ]] || die 'Не найдено признаков установки VLESS-REALITY (/etc/ru-reality). Автоудаление запрещено.'
+  # Повторный запуск удаления после успешно завершённого --uninstall
+  # не должен приводить к ошибке или случайному удалению чужих служб.
+  if [[ ! -r "$meta" && ! -r "$state" ]]; then
+    say 'Данных VLESS-REALITY нет; удалять нечего (возможно, уже удалено).'
+    return 0
+  fi
   info=$(python3 - "$meta" "$state" <<'PY_UNINSTALL_INFO'
 import json,sys,re
 meta,st=sys.argv[1:]
@@ -84,7 +89,7 @@ PY_UNINSTALL_INFO
   printf '  сертификат Certbot для %s (и %s), хуки продления.\n' "$domain" "$subdomain"
   printf 'Не трогаем: SSH, UFW/iptables, RU Relay на другом сервере.\n'
   if (( purge_packages )); then
-    [[ -r "$meta" ]] || die '--purge-packages разрешён только для новых установок, которые сохранили состав пакетов.'
+    [[ -r "$meta" ]] || warn 'Нет данных о пакетах: удалим VPN без удаления системных пакетов.'
     warn 'Дополнительно будут удалены пакеты, поставленные только этим скриптом, если не используются другие сайты.'
   else
     warn 'Пакеты Nginx, Certbot, Fail2ban и общие системные зависимости останутся установленными.'
@@ -93,17 +98,9 @@ PY_UNINSTALL_INFO
   ask confirm_delete 'Для удаления введи DELETE' ''
   [[ "$confirm_delete" == DELETE ]] || die 'Отмена удаления'
 
-  # Проверяем возможность безопасного удаления ПО до изменения файлов.
-  if (( purge_packages )); then
-    local external_nginx=0 path
-    for path in /etc/nginx/sites-enabled/* /etc/nginx/stream-enabled/* /etc/nginx/conf.d/*.conf; do
-      [[ -e "$path" || -L "$path" ]] || continue
-      case "$path" in
-        /etc/nginx/sites-enabled/ru-reality-https|/etc/nginx/stream-enabled/ru-reality.conf) ;;
-        *) external_nginx=1 ;;
-      esac
-    done
-    (( external_nginx == 0 )) || die 'Есть другие конфигурации Nginx; отказываюсь удалять его пакеты. Используй только --uninstall.'
+  # Не блокируем удаление VPN из-за чужих или оставшихся от пакетов Nginx
+  # конфигураций. Пакеты nginx удаляем только если nginx не используется другими.
+  if (( purge_packages )) && [[ -r "$meta" ]]; then
     mapfile -t purge_list < <(python3 - "$meta" <<'PY_PACKAGE_LIST'
 import json,sys
 m=json.load(open(sys.argv[1]))
@@ -180,8 +177,31 @@ PY_NGINX_CLEAN
   rm -rf -- /etc/ru-reality
 
   if (( purge_packages )) && (( ${#purge_list[@]} > 0 )); then
-    say 'Удаление установленных скриптом пакетов (явный режим)'
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y "${purge_list[@]}" || warn 'Проверь пакеты: apt-get purge завершился с ошибкой.'
+    say 'Проверка и удаление системных пакетов, поставленных установщиком'
+    # Любые оставшиеся посторонние сайты/stream-конфигурации блокируют
+    # только purge nginx-пакетов, но не очистку нашего VPN.
+    local external_nginx=0 path pkg
+    for path in /etc/nginx/sites-enabled/* /etc/nginx/sites-available/* /etc/nginx/stream-enabled/* /etc/nginx/conf.d/*.conf; do
+      [[ -e "$path" || -L "$path" ]] || continue
+      case "$path" in
+        /etc/nginx/sites-available/default|/etc/nginx/sites-enabled/default) ;;
+        *) external_nginx=1 ;;
+      esac
+    done
+    local -a safe_purge=() skipped_purge=()
+    for pkg in "${purge_list[@]}"; do
+      case "$pkg" in
+        nginx|nginx-common|libnginx-mod-stream)
+          if (( external_nginx )); then skipped_purge+=("$pkg"); else safe_purge+=("$pkg"); fi ;;
+        *) safe_purge+=("$pkg") ;;
+      esac
+    done
+    if (( ${#skipped_purge[@]} )); then
+      warn "Оставлены пакеты Nginx (есть другие конфигурации): ${skipped_purge[*]}"
+    fi
+    if (( ${#safe_purge[@]} )); then
+      DEBIAN_FRONTEND=noninteractive apt-get purge -y "${safe_purge[@]}" || warn 'Проверь пакеты: apt-get purge завершился с ошибкой.'
+    fi
     # apt autoremove намеренно не вызываем: он может затронуть другое ПО.
   fi
   say 'Удаление завершено'
@@ -299,9 +319,16 @@ else
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y curl ca-certificates openssl python3 certbot sqlite3 nginx-common
-  certbot certonly --standalone --preferred-challenges http \
-    --non-interactive --agree-tos --email "$EMAIL" \
-    --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
+  if [[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] \
+      && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -checkend 604800 >/dev/null 2>&1 \
+      && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -ext subjectAltName | grep -Fq "DNS:$DOMAIN" \
+      && openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -ext subjectAltName | grep -Fq "DNS:$SUBDOMAIN"; then
+    warn 'Переиспользуем существующий действительный сертификат Certbot (без нового выпуска).'
+  else
+    certbot certonly --standalone --preferred-challenges http \
+      --non-interactive --agree-tos --email "$EMAIL" \
+      --cert-name "$DOMAIN" -d "$DOMAIN" -d "$SUBDOMAIN"
+  fi
   [[ -r "$CERT_DIR/fullchain.pem" && -r "$CERT_DIR/privkey.pem" ]] || die 'Сертификаты не найдены'
   say 'Установка Nginx и stream-модуля'
   apt-get install -y nginx libnginx-mod-stream

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.5 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.6 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
@@ -17,9 +17,24 @@ exec 3<>/dev/tty
 ask() {
   local __name="$1" question="$2" def="${3:-}" answer
   if ! IFS= read -r -u 3 -p "$question${def:+ [$def]}: " answer; then die 'Ввод прерван'; fi
-  printf -v "$__name" '%s' "${answer:-$def}"
+  # Очистка пробелов, CR и случайных переводов строки по краям ввода.
+  answer="${answer:-$def}"
+  answer="${answer#"${answer%%[![:space:]]*}"}"
+  answer="${answer%"${answer##*[![:space:]]}"}"
+  printf -v "$__name" '%s' "$answer"
 }
-valid_domain() { [[ "$1" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && "$1" == *.* && ${#1} -le 253 && "$1" != *..* ]]; }
+valid_domain() {
+  local domain="$1" label
+  [[ ${#domain} -le 253 && "$domain" == *.* ]] || return 1
+  [[ "$domain" != *..* ]] || return 1
+  local -a labels
+  IFS='.' read -r -a labels <<< "$domain"
+  (( ${#labels[@]} >= 2 )) || return 1
+  for label in "${labels[@]}"; do
+    [[ ${#label} -ge 1 && ${#label} -le 63 ]] || return 1
+    [[ "$label" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] || return 1
+  done
+}
 valid_ipv4() { python3 - "$1" <<'PY'
 import ipaddress,sys
 try:
@@ -214,10 +229,10 @@ fi
 ask DOMAIN 'Основной домен REALITY (пример: example.com)'
 DOMAIN=${DOMAIN,,}
 SUBDOMAIN_DEFAULT="sub.$DOMAIN"
-valid_domain "$DOMAIN" || die 'Неверный домен'
+valid_domain "$DOMAIN" || die "Неверный домен: $(printf '%q' "$DOMAIN")"
 ask SUBDOMAIN 'Домен панели и подписок' "$SUBDOMAIN_DEFAULT"
 SUBDOMAIN=${SUBDOMAIN,,}
-valid_domain "$SUBDOMAIN" || die 'Неверный домен подписок'
+valid_domain "$SUBDOMAIN" || die "Неверный домен подписок: $(printf '%q' "$SUBDOMAIN")"
 [[ "$DOMAIN" != "$SUBDOMAIN" ]] || die 'Домены должны различаться'
 ask EU_IP 'Публичный IPv4 EU сервера' "$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
 valid_ipv4 "$EU_IP" || die 'Неверный публичный EU IP'

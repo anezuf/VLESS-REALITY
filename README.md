@@ -1,133 +1,109 @@
-# Гайд по настройке панели 3x-ui
+# ANEZUF — VLESS REALITY
 
-## Reset (при необходимости)
+Автоматическая установка VPN на базе **3x-ui, Xray REALITY и Nginx** с поддержкой RU Relay и Cloudflare WARP.
 
-```bash
-ssh-keygen -R <ip-server>
-```
+## 1. Обновление сервера
 
----
-
-## 0. Полная установка скриптом
+Выполнить на чистом EU VPS под `root`:
 
 ```bash
-apt-get update && apt-get install -y curl && curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh && bash install.sh
+apt update && apt upgrade -y && apt install -y curl
 ```
 
-## 0. Полная удаление
+## 2. Установка VPN
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh && bash install.sh --uninstall --purge-packages
+curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh
+bash install.sh
 ```
 
----
+После запуска указать домены, EU IP и, при необходимости, RU Relay IP.
 
-## 1. Системное обновление
+После успешной установки появится экран **ANEZUF** с адресом панели, логином, паролем и готовой VLESS REALITY-ссылкой.
+
+## 3. Полное удаление
 
 ```bash
-sudo apt update && sudo apt upgrade -y
+curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh
+bash install.sh --uninstall --purge-packages
 ```
 
----
+Для подтверждения ввести `DELETE`.
 
-## 2. Установка 3x-ui — скрипт x-ui pro
+**Очистка после неудачной установки:**
 
 ```bash
-bash <(wget -qO- https://github.com/mozaroc/x-ui-pro/raw/master/x-ui-pro.sh) -install yes -panel 1 -ONLY_CF_IP_ALLOW no
+bash install.sh --uninstall --purge-packages --clean-orphan-nginx
 ```
 
----
+Последний режим использовать только на выделенном VPS без сторонних сайтов.
 
-## 3. Настройка Reality inbound
+## 4. Настройка Cloudflare WARP
 
-В панели 3x-ui, в настройках inbound, установить:
+После успешной установки REALITY открыть панель 3x-ui.
 
-| Поле | Значение |
+1. Перейти в **Настройки Xray → Исходящие соединения (Outbounds)**.
+2. Открыть раздел **WARP** и выбрать регистрацию через **MASQUE**.
+3. Зарегистрировать WARP и добавить исходящее соединение с тегом `warp-masque`.
+4. Назначить `warp-masque` исходящим соединением по умолчанию, сохранив необходимые исключения в маршрутизации.
+5. Сохранить настройки и перезапустить Xray через панель.
+
+**Рекомендуемая маршрутизация:**
+
+| Трафик | Outbound |
 |---|---|
-| Protocol | `vless` |
-| Port | `8443` |
-| Security | `Reality` |
-| uTLS | `chrome` |
-| SNI | `reality_domain` (твой поддомен, автоматически заполняется скриптом) |
-| Target | `127.0.0.1:9443` (локальный nginx — отвечает как реальный сайт при зондировании) |
-| flow | `xtls-rprx-vision` |
+| `geoip:ru` | `direct` |
+| `domain:ru`, `domain:su`, `domain:xn--p1ai` | `direct` |
+| `geosite:category-ads-all` | `blocked` |
+| `geoip:private` | `blocked` |
+| `bittorrent` | `blocked` |
+| Остальной интернет | `warp-masque` |
 
-> **Почему такая архитектура:** скрипт mozaroc разворачивает nginx с реальным SSL-сертификатом на твоём домене. При active probing РКН сервер отвечает настоящим TLS-ответом через nginx, а не проксирует на сторонний сайт. Это надёжнее чем указывать чужой домен — сертификат реальный и принадлежит тебе.
+Правила исключений должны располагаться выше завершающего правила WARP.
 
-> **Почему `chrome`, не `random`:** `random` генерирует несуществующий TLS fingerprint, который легко детектируется. `chrome` — реальный браузерный fingerprint, неотличим от обычного пользователя.
+## 5. Дополнительные команды
 
----
+**Открыть меню управления 3x-ui:**
 
-## 4. Включение сниффинга
+```bash
+x-ui
+```
 
-В настройках inbound включить **Sniffing** и поставить галочки:
+**Обновить локальный установщик с GitHub:**
 
-- [x] HTTP
-- [x] TLS
-- [ ] QUIC — убрать
-- [ ] FAKEDNS — убрать
+```bash
+curl -fsSL https://raw.githubusercontent.com/anezuf/VLESS-REALITY/main/install.sh -o install.sh
+```
 
-Включить опцию **`Route Only`**.
+**Сбросить старый SSH-ключ сервера (на своём компьютере):**
 
-> Сниффинг нужен чтобы Xray определял протокол и домен назначения для маршрутизации — без расшифровки трафика. `Route Only` гарантирует что сниффинг используется только для маршрутизации, не для изменения трафика. QUIC убираем — ты используешь TCP, QUIC sniffer лишний.
+```bash
+ssh-keygen -R <IP_сервера>
+```
 
----
-
-## 5. Стратегия разрешения DNS
-
-В панели: **Настройки Xray → Основные настройки → Настройка маршрутизации доменов**
-
-Установить: **`IPIfNonMatch`**
-
-> Xray сначала применяет правила по домену. Если ни одно не подошло — резолвит домен в IP и проверяет снова по IP-правилам. Удобно когда основная логика по доменам, IP как резерв.
+Использовать после переустановки VPS, предварительно убедившись, что изменение ключа ожидаемо.
 
 ---
 
-## 6. Базовое соединение — WARP
+## Информация о конфигурации
 
-В панели: **Настройки Xray → Базовые соединения**
+Установщик автоматически настраивает:
 
-Установить **WARP** (WireGuard outbound) как базовое исходящее соединение. Весь трафик, не попавший под другие правила, уходит через Cloudflare.
+| Параметр | Значение |
+|---|---|
+| Protocol | VLESS |
+| Network | TCP |
+| Security | REALITY |
+| Flow | `xtls-rprx-vision` |
+| Inbound Port | `8443` |
+| External Port | `443` |
+| REALITY Target | `127.0.0.1:9443` |
+| Fingerprint | `firefox` |
+| Routing Strategy | `IPIfNonMatch` |
+| SSL | Let's Encrypt |
 
-> WARP в данной конфигурации реализован через WireGuard напрямую в Xray — без warp-cli и SOCKS5. Это надёжнее и не требует отдельного сервиса.
+**RU Relay:** клиент подключается к RU IP по порту `443`. На EU-сервере Nginx передаёт REALITY-соединение внутреннему Xray на `8443`.
 
----
+**WARP:** регистрируется отдельно через панель 3x-ui. До его включения VPN использует прямое исходящее соединение EU-сервера.
 
-## 7. Маршрутизация
-
-Правила обрабатываются **строго сверху вниз**.
-
-| № | Что проверяем | Значение | Исходящий тег | Назначение |
-|---:|---|---|---|---|
-| **1** | IP | `geoip:ru` | `direct` | Российские IP напрямую, без туннеля |
-| **2** | Domain | `domain:ru`, `domain:su`, `domain:xn--p1ai`, `geosite:category-ru` | `direct` | Российские домены напрямую |
-| **3** | Domain | `geosite:category-ads-all` | `blocked` | Реклама и трекеры |
-| **4** | Network + Port | `UDP` + `443` | `blocked` | Блокировка QUIC/HTTP3, принудительный TCP |
-| **5** | Inbound Tag | `api` | `api` | Служебный API панели |
-| **6** | IP | `geoip:private` | `blocked` | Блокировка приватных IP через сервер |
-| **7** | Protocol | `bittorrent` | `blocked` | Блокировка BitTorrent/P2P |
-| **8** | User / Email | `first` | `warp` | Трафик клиента через Cloudflare WARP |
-
-> Если ни одно правило не совпало — трафик уходит в outbound по умолчанию (WARP).
-
----
-
-### Логика правил
-
-- **Правила 1–2** — российские IP и домены идут напрямую. Это важно: без них пользователь не сможет открывать ru-сайты.
-- **Правило 3** — реклама и трекеры блокируются отдельно от российских доменов.
-- **Правило 4** — блокировка `UDP:443` чтобы браузеры не использовали QUIC/HTTP3 и переключались на TCP.
-- **Правило 5** — служебное, для API панели.
-- **Правило 6** — блокировка приватных IP через сервер.
-- **Правило 7** — блокировка BitTorrent, снижает риск жалоб хостингу.
-- **Правило 8** — весь оставшийся трафик клиента `first` через WARP.
-
----
-
-### Сводка
-
-**Напрямую:** `geoip:ru`, `domain:ru`, `domain:su`, `domain:xn--p1ai`, `geosite:category-ru`  
-**Заблокировано:** `geosite:category-ads-all`, `geoip:private`, `bittorrent`, `UDP:443`  
-**Через WARP:** всё остальное
-
-> Примечание: `geosite:category-ru` зависит от используемой geosite-базы. Если категории нет — оставь только явные домены.
+**Важно:** установщик предназначен для чистого VPS. Удаление необратимо. При частых переустановках Let's Encrypt может временно ограничивать повторный выпуск сертификатов для тех же доменов.

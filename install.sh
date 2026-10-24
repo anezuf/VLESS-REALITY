@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
-# VLESS REALITY / 3x-ui installer — v0.9.8 — Ubuntu/Debian x86_64, clean VPS
+# VLESS REALITY / 3x-ui installer — v0.9.9 — Ubuntu/Debian x86_64, clean VPS
 set -Eeuo pipefail
 umask 077
 
 say() { printf '\n\033[1;36m%s\033[0m\n' "$*"; }
+anezuf_banner() {
+  printf '\033[1;36m' >&3
+  cat >&3 <<'BANNER'
+
+    █████╗ ███╗   ██╗███████╗███████╗██╗   ██╗███████╗
+   ██╔══██╗████╗  ██║██╔════╝╚══███╔╝██║   ██║██╔════╝
+   ███████║██╔██╗ ██║█████╗    ███╔╝ ██║   ██║█████╗
+   ██╔══██║██║╚██╗██║██╔══╝   ███╔╝  ██║   ██║██╔══╝
+   ██║  ██║██║ ╚████║███████╗███████╗╚██████╔╝██║
+   ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝ ╚═════╝ ╚═╝
+
+BANNER
+  printf '\033[0m' >&3
+}
+
 warn() { printf '\033[1;33m%s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 trap 'warn "Ошибка на строке $LINENO (код $?). Проверь вывод выше; автоматического удаления данных нет."' ERR
@@ -261,6 +276,7 @@ if [[ "${1:-}" == '--uninstall' ]]; then
   exit 0
 fi
 
+anezuf_banner
 say 'VLESS REALITY — автоматическая установка 3x-ui + Nginx'
 warn 'Только для чистого VPS. На существующем сервере с VPN/Nginx ничего не переустанавливай.'
 for cmd in curl python3 ip ss systemctl getent;  do command -v "$cmd" >/dev/null || die "Не найдена команда $cmd"; done
@@ -834,23 +850,40 @@ print('PASS: Клиентская ссылка: :443, REALITY publicKey и X2551
 print('PASS: REALITY publicKey/fingerprint; 4 inbounds')
 PYVERIFY2
 
-say 'ГОТОВО — базовая установка без WARP'
-python3 - <<'PY'
-import json
-s=json.load(open('/etc/ru-reality/state.json'))
-print('Панель: https://'+s['subdomain']+s['panel_path'])
-print('Адрес клиента: '+s['host_ip']+':443')
-print('SNI: '+s['domain'])
-print('Fingerprint: firefox')
-print('Готовая ссылка клиента: sudo cat /etc/ru-reality/client-vless.txt (секрет!)')
-print('Внимание: прямой экспорт Inbound 3x-ui может показывать внутренний порт 8443; для RU Relay импортируй готовую ссылку с портом 443.')
-print('Данные REALITY сохранены: /etc/ru-reality/state.json (только root)')
-print('Учётные данные: проверь вывод официального установщика или команду x-ui (сброс логина/пароля).')
-PY
-if [[ -s /etc/x-ui/install-result.env ]]; then
-  warn 'Учётные данные, созданные установщиком: sudo cat /etc/x-ui/install-result.env (не отправляй их никому)'
+# Экран результата показываем только после успешных проверок.
+# На ошибке терминал не очищаем — логи остаются видимыми.
+if [[ -n "${TERM:-}" && "${TERM:-}" != dumb ]] && command -v clear >/dev/null 2>&1; then
+  clear >&3 2>/dev/null || printf '\033[2J\033[H' >&3
+else
+  printf '\033[2J\033[H' >&3
 fi
-say 'Сертификаты HTTPS прописаны непосредственно в панели 3x-ui (Settings -> Certificates).'
-warn 'WARP MASQUE вручную в 3x-ui → Xray Settings → Outbounds. После регистрации настрой маршрутизацию по умолчанию.'
-warn 'v0.9.5 (тестовая): WS/gRPC созданы, XHTTP выключен. Веб-страница подписок и sub2sing-box ещё не устанавливаются.'
-warn 'Обязательно проверь клиентскую ссылку REALITY, соединение через RU Relay и дополнительные протоколы перед продакшеном.'
+anezuf_banner
+printf '\033[1;32m  УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА\033[0m\n' >&3
+printf '  ────────────────────────────────────────────────────\n' >&3
+python3 - <<'PY_FINAL'
+import json
+from pathlib import Path
+s=json.loads(Path('/etc/ru-reality/state.json').read_text())
+uri=Path('/etc/ru-reality/client-vless.txt').read_text().strip()
+print(f"  Панель:  https://{s['subdomain']}{s['panel_path']}")
+print(f"  REALITY: {s['host_ip']}:443")
+print(f"  SNI:     {s['domain']}")
+print('  Flow:    xtls-rprx-vision')
+print('  Fingerprint: firefox')
+print('  ────────────────────────────────────────────────────')
+print('  ГОТОВЫЙ VLESS REALITY КОНФИГ (секрет):')
+print(uri)
+print('  ────────────────────────────────────────────────────')
+PY_FINAL
+if [[ -r /etc/x-ui/install-result.env ]]; then
+  # Файл создан нашим установщиком, его формат — shell-escaped KEY=value.
+  . /etc/x-ui/install-result.env
+  printf '  Логин:   %s\n' "$PANEL_USERNAME" >&3
+  printf '  Пароль:  %s\n' "$PANEL_PASSWORD" >&3
+else
+  warn 'Не найден /etc/x-ui/install-result.env: проверь данные панели через x-ui.'
+fi
+printf '\n  Учётные данные и VLESS-ссылка секретные.\n' >&3
+printf '  Сохранены локально (доступ только root):\n' >&3
+printf '  /etc/x-ui/install-result.env\n  /etc/ru-reality/client-vless.txt\n' >&3
+printf '  WARP MASQUE при необходимости настраивается вручную в 3x-ui.\n\n' >&3
